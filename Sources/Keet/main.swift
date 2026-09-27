@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
+import KeetCore
 import os
 
 private let log = Logger(subsystem: "agency.ziplyne.keet", category: "app")
@@ -13,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tapRetry: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let out = ProcessInfo.processInfo.environment["KEET_MIC_PROBE"] {
+            MicProbe.run(output: URL(fileURLWithPath: out))
+            return
+        }
         if let dir = ProcessInfo.processInfo.environment["KEET_SNAPSHOT"] {
             let demo = AppController(history: HistoryStore(sample: Snapshot.sampleHistory()))
             Snapshot.render(to: URL(fileURLWithPath: dir), controller: demo)
@@ -135,4 +140,52 @@ MainActor.assumeIsolated {
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
     app.run()
+}
+
+/// Diagnostic: records a few seconds from each input device and writes a timeline of
+/// what the engine did (configuration changes, whether it kept running, samples
+/// arriving). Run inside the app bundle so it has Keet's microphone permission:
+/// `open -n --env KEET_MIC_PROBE=/tmp/probe.txt /Applications/Keet.app`
+@MainActor
+enum MicProbe {
+    static func run(output: URL) {
+        final class Lines: @unchecked Sendable {
+            private var items: [String] = []
+            private let lock = NSLock()
+            func append(_ line: String) { lock.lock(); items.append(line); lock.unlock() }
+            var text: String { lock.lock(); defer { lock.unlock() }; return items.joined(separator: "\n") }
+        }
+        let lines = Lines()
+        let devices: [(String, String?)] = [("Automatic", nil)] + AudioDevices.inputs().map { ($0.name, $0.uid) }
+        DispatchQueue.global().async {
+            for (name, uid) in devices {
+                let recorder = AudioRecorder()
+                recorder.preferredDeviceUID = uid
+                let t0 = CFAbsoluteTimeGetCurrent()
+                func ms() -> Int { Int((CFAbsoluteTimeGetCurrent() - t0) * 1000) }
+                let observer = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil
+                ) { _ in lines.append("  \(ms()) ms: configuration change, engine running \(recorder.engineIsRunning)") }
+                recorder.onInterruption = { lines.append("  \(ms()) ms: interruption callback") }
+                do {
+                    try recorder.prepare()
+                    lines.append("\(name): built on \(recorder.activeDeviceName ?? "?") at \(Int(recorder.sampleRate)) Hz")
+                    try recorder.start()
+                } catch {
+                    lines.append("\(name): failed: \(error.localizedDescription)")
+                    NotificationCenter.default.removeObserver(observer)
+                    continue
+                }
+                for step in 1...15 {
+                    usleep(200_000)
+                    lines.append("  \(step * 200) ms: running \(recorder.engineIsRunning), samples \(recorder.capturedCount)")
+                }
+                let samples = recorder.stop()
+                lines.append("  stopped with \(samples.count) samples (\(String(format: "%.2f", Double(samples.count) / recorder.sampleRate)) s)")
+                NotificationCenter.default.removeObserver(observer)
+            }
+            try? lines.text.write(to: output, atomically: true, encoding: .utf8)
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
 }

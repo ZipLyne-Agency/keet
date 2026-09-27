@@ -58,20 +58,28 @@ public struct EnergyTracker {
 
     /// Frames above this count as speech: about 9 dB over the room noise, pulled
     /// down toward the loudest speech so quiet word endings still count, but never
-    /// within 4 dB of the noise itself (or the room would never read as quiet).
+    /// within 6 dB of the noise itself. Quiet microphones put speech only 15 to 20 dB
+    /// above the room, and closer than 6 dB the noise alone keeps crossing the line.
     public var speechThresholdDb: Float {
         let floor = noiseFloorDb
         let preferred = min(max(floor + 9, -62), peakDb - 18)
-        return max(preferred, floor + 4)
+        return max(preferred, floor + 6)
     }
 
-    /// Milliseconds of continuous non-speech at the end of the stream.
+    /// Milliseconds of continuous non-speech at the end of the stream. Speech is two
+    /// or more loud frames in a row; a lone 10 ms spike is room noise and doesn't
+    /// reset the count.
     public var trailingQuietMs: Int {
         let threshold = speechThresholdDb
         var quiet = 0
-        for db in framesDb.reversed() {
-            if db >= threshold { break }
+        var index = framesDb.count - 1
+        while index >= 0 {
+            if framesDb[index] >= threshold {
+                let previousLoud = index > 0 && framesDb[index - 1] >= threshold
+                if previousLoud || index == 0 { break }
+            }
             quiet += 1
+            index -= 1
         }
         return quiet * 10
     }

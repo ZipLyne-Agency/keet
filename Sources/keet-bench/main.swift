@@ -5,8 +5,9 @@ import KeetCore
 // keet-bench transcribe <file>...          load time, warm-up time, per-file latency and text
 // keet-bench lastword <dir>                 cut each clip at the end of its last word and
 //                                           compare transcripts across trailing pads
-// keet-bench tail <dir> [noise dB]          release 40 ms before the last word ends, with room
+// keet-bench tail <dir> [noise dB] [gain dB] release 40 ms before the last word ends, with room
 //                                           noise mixed in, and see where the tail stops
+// keet-bench noise <dir> [noise dB] [peak dB...]  word error rate by speech level over room noise
 // keet-bench mic <seconds>                  microphone start latency, then transcribe
 
 func now() -> Double { CFAbsoluteTimeGetCurrent() }
@@ -89,6 +90,7 @@ case "tail":
     // last word ends, and runs the recorder's tail rule to see where capture stops.
     let dir = URL(fileURLWithPath: args[1])
     let noiseDb = Float(args.count > 2 ? args[2] : "-55") ?? -55
+    let gain = pow(10, (Float(args.count > 3 ? args[3] : "0") ?? 0) / 20)  // speech level change, dB
     let noiseAmp = pow(10, noiseDb / 20) * 1.7  // uniform noise with this RMS
     let wavs = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         .filter { $0.pathExtension == "wav" }
@@ -98,14 +100,15 @@ case "tail":
     var lastWordKept = 0
     for wav in wavs {
         let expected = try String(contentsOf: wav.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8)
-        var clip = try transcriber.loadAudioFile(wav)
+        var clip = try transcriber.loadAudioFile(wav).map { $0 * gain }
         // 80 ms of room before speech (reaction time) and 1 s after it.
         clip = [Float](repeating: 0, count: 1280) + clip + [Float](repeating: 0, count: 16_000)
-        for i in clip.indices { clip[i] += Float.random(in: -noiseAmp...noiseAmp) }
+        // Find where speech ends on the clean clip, before any room noise is added.
         var probe = EnergyTracker(sampleRate: 16_000)
         probe.consume(clip)
         let loud = probe.peakDb - 40
         let speechEnd = ((probe.framesDb.lastIndex { $0 >= loud } ?? 0) + 1) * 160
+        for i in clip.indices { clip[i] += Float.random(in: -noiseAmp...noiseAmp) }
         let release = speechEnd - 640  // 40 ms early
         var tracker = EnergyTracker(sampleRate: 16_000)
         tracker.consume(Array(clip[0..<release]))
@@ -124,6 +127,51 @@ case "tail":
     }
     tails.sort()
     print("\nroom noise \(Int(noiseDb)) dB: last word kept \(lastWordKept)/\(wavs.count), tail median \(tails[tails.count / 2]) ms, max \(tails.last ?? 0) ms")
+
+case "noise":
+    // Word error rate over the clips when speech sits at a given level over room noise,
+    // transcribed as recorded and with the level raised to a -3 dB peak first.
+    // Clips 00 and 10 (the robotic voice) are skipped.
+    let dir = URL(fileURLWithPath: args[1])
+    let noiseDb = Float(args.count > 2 ? args[2] : "-54") ?? -54
+    let peaks = args.count > 3 ? args[3...].compactMap(Float.init) : [-12, -24, -30, -36, -42]
+    let wavs = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        .filter { $0.pathExtension == "wav" && !["00.wav", "10.wav"].contains($0.lastPathComponent) }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    func wordErrors(_ ref: [String], _ hyp: [String]) -> Int {
+        var d = Array(0...hyp.count)
+        for (i, r) in ref.enumerated() {
+            var prev = d[0]; d[0] = i + 1
+            for (j, h) in hyp.enumerated() {
+                let cur = min(d[j + 1] + 1, d[j] + 1, prev + (r == h ? 0 : 1)); prev = d[j + 1]; d[j + 1] = cur
+            }
+        }
+        return d[hyp.count]
+    }
+    func norm(_ s: String) -> [String] {
+        normalizeWords(s.lowercased().replacingOccurrences(of: "ten thirty", with: "10 30")
+            .replacingOccurrences(of: "standup", with: "stand up"))
+    }
+    let noiseAmp = pow(10, noiseDb / 20) * 1.7
+    for peak in peaks {
+        var total = 0, errorsRaw = 0, errorsBoosted = 0
+        for wav in wavs {
+            let ref = norm(try String(contentsOf: wav.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8))
+            var clip = try transcriber.loadAudioFile(wav)
+            let clipPeak = clip.map(abs).max() ?? 1
+            let scale = pow(10, peak / 20) / clipPeak
+            clip = [Float](repeating: 0, count: 3200) + clip.map { $0 * scale } + [Float](repeating: 0, count: 3200)
+            for i in clip.indices { clip[i] += Float.random(in: -noiseAmp...noiseAmp) }
+            let boost = pow(10, Float(-3) / 20) / (clip.map(abs).max() ?? 1)
+            let raw = norm(try await transcriber.transcribe(clip))
+            let boosted = norm(try await transcriber.transcribe(clip.map { $0 * boost }))
+            total += ref.count
+            errorsRaw += wordErrors(ref, raw)
+            errorsBoosted += wordErrors(ref, boosted)
+        }
+        print(String(format: "speech peak %4.0f dB over %3.0f dB noise (%2.0f dB apart): %4.1f%% word errors as recorded, %4.1f%% boosted",
+                     peak, noiseDb, peak - noiseDb, 100 * Double(errorsRaw) / Double(total), 100 * Double(errorsBoosted) / Double(total)))
+    }
 
 case "mic":
     let seconds = Double(args.count > 1 ? args[1] : "3") ?? 3

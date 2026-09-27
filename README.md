@@ -9,7 +9,10 @@ Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio). Tran
 few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within about
 30 ms of pressing the key.
 
-- **Hold to talk.** A small waveform pill at the bottom of the screen shows it's listening.
+- **Hold to talk.** A pill at the bottom of the screen shows a live waveform and the
+  words as you say them.
+- **Talk for as long as you like.** A bumped key or a click can't end a long dictation,
+  and even Escape keeps what you said (in History, unpasted).
 - **The last word always makes it.** Keet keeps listening for a moment after you let go,
   but only while you're still finishing a word. See [how](docs/REMAKE.md#the-tail-why-the-last-word-never-gets-cut).
 - **No text field? No lost words.** If nothing can take text, a card shows what you said with a Copy button.
@@ -49,8 +52,8 @@ signs ad hoc, and macOS asks again after every rebuild.
 |---|---|
 | Hold Left Option and talk | The pill appears and follows your voice |
 | Let go | The text is pasted where your cursor is |
-| Escape while holding | Cancels |
-| Option + another key, or a click | Treated as a normal shortcut, never a dictation |
+| Escape while holding | Cancels; after 2 seconds of talking, the text is kept in History instead of pasted |
+| Option + another key, or a click, in the first 0.6 s | Treated as a normal shortcut, never a dictation |
 | Let go with no text field focused | A card shows the text with a Copy button |
 
 Open the window from the menu bar icon (or launch Keet again) to see your history and

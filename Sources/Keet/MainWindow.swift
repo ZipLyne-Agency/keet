@@ -404,13 +404,15 @@ private struct DictationRow: View {
                     Text(entry.date.formatted(date: .omitted, time: .shortened))
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.tertiary)
-                    if entry.delivery == .card {
-                        Text("Not inserted")
+                    if entry.delivery != .pasted {
+                        Text(entry.delivery == .card ? "Not inserted" : "Cancelled")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Theme.warning)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(Capsule().fill(Theme.warning.opacity(0.12)))
-                            .help("No text field had focus, so it went to the Copy card")
+                            .help(entry.delivery == .card
+                                  ? "No text field had focus, so it went to the Copy card"
+                                  : "You pressed Escape, so it was kept here instead of pasted")
                     }
                     Spacer(minLength: 8)
                     // Timing at rest, actions on hover, in the same spot.
@@ -509,12 +511,16 @@ private struct SettingsPage: View {
     @ObservedObject var controller: AppController
     @ObservedObject var history: HistoryStore
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var inputVolume: Float?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 section("Dictation key", "Hold to talk, let go to insert. Escape cancels.") { keyPicker }
-                section("Microphone", nil) { microphone }
+                section("Microphone", nil) {
+                    microphone
+                    micNotes
+                }
                 section("General", nil) { general }
                 section("Permissions", "Keet needs both to hear you and to type for you.") { permissions }
                 section("Speech model", "Runs entirely on this Mac. Nothing you say leaves it.") { model }
@@ -580,6 +586,26 @@ private struct SettingsPage: View {
                 ForEach(controller.inputDevices) { device in
                     micRow(uid: device.uid, name: device.name, detail: detail(device), symbol: symbol(device))
                 }
+                if let volume = inputVolume {
+                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 6)
+                    HStack(spacing: 12) {
+                        Text("Input volume")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.text)
+                            .frame(width: 90, alignment: .leading)
+                        Slider(value: Binding(
+                            get: { Double(volume) },
+                            set: { inputVolume = Float($0); controller.setInputVolume(Float($0)) }
+                        ), in: 0...1)
+                        .tint(Theme.accent)
+                        Text("\(Int((volume * 100).rounded()))%")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.secondary)
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                }
                 Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 6)
                 HStack(spacing: 12) {
                     Button(action: controller.toggleMicTest) {
@@ -593,23 +619,65 @@ private struct SettingsPage: View {
                     .buttonStyle(.plain)
                     LevelMeter(level: controller.micTestLevel)
                         .frame(height: 10)
-                    Text(controller.isTestingMic ? "Speak now" : controller.activeMicName)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.secondary)
-                        .lineLimit(1)
-                        .frame(width: 150, alignment: .trailing)
+                    Group {
+                        if controller.isTestingMic {
+                            if controller.micTestPeakDb > -100 {
+                                Text("Peak \(Self.decibels(controller.micTestPeakDb))")
+                                    .foregroundStyle(levelColor(controller.micTestPeakDb))
+                            } else {
+                                Text("Speak now").foregroundStyle(Theme.secondary)
+                            }
+                        } else {
+                            Text(controller.activeMicName).foregroundStyle(Theme.secondary)
+                        }
+                    }
+                    .font(.system(size: 11).monospacedDigit())
+                    .lineLimit(1)
+                    .frame(width: 150, alignment: .trailing)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
         }
-        .overlay(alignment: .bottomLeading) {
-            Text("Bluetooth headsets drop to call quality while their microphone is on. The Mac's own microphone avoids that.")
+        .onAppear { inputVolume = controller.inputVolume() }
+        .onChange(of: controller.selectedMicUID) { _, _ in inputVolume = controller.inputVolume() }
+        .onChange(of: controller.systemDefaultMic) { _, _ in inputVolume = controller.inputVolume() }
+    }
+
+    /// Guidance under the microphone card: how loud you've been, and what to aim for.
+    @ViewBuilder private var micNotes: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let peak = controller.recentPeakDb, peak < -28 {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.warning)
+                    Text("Your voice has been reaching Keet at about \(Self.decibels(peak)). Aim for −20 to −10 dB while you talk: move closer to the microphone or raise the input volume. Quiet audio is the most common cause of wrong words; at −36 dB about one word in ten comes out wrong, against almost none at −12 dB.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if let peak = controller.recentPeakDb {
+                Text("Your recent dictations peaked around \(Self.decibels(peak)), a good level.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tertiary)
+            }
+            Text("Press Test and talk normally: aim for a peak between −20 and −10 dB. Bluetooth headsets drop to call quality while their microphone is on; the Mac's own microphone avoids that.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.tertiary)
-                .offset(y: 22)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.bottom, 16)
+    }
+
+    /// "−36 dB", with a real minus sign.
+    static func decibels(_ value: Float) -> String {
+        "\(Int(value.rounded()))".replacingOccurrences(of: "-", with: "\u{2212}") + " dB"
+    }
+
+    private func levelColor(_ db: Float) -> Color {
+        if db > -4 { return Theme.danger }
+        if db >= -24 { return Theme.accent }
+        return Theme.warning
     }
 
     private func micRow(uid: String?, name: String, detail: String, symbol: String) -> some View {
@@ -664,6 +732,12 @@ private struct SettingsPage: View {
     private var general: some View {
         Card(padding: 0) {
             VStack(spacing: 0) {
+                toggleRow("Show words as you speak", "Live captions in the pill while you hold the key.",
+                          isOn: $controller.livePreview)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                toggleRow("Play a sound when listening starts", "A soft chime the moment Keet starts hearing you.",
+                          isOn: $controller.startSoundOn)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
                 toggleRow("Open at login", "Start Keet when you log in, so the key always works.", isOn: $openAtLogin)
                     .onChange(of: openAtLogin) { _, on in
                         do {
@@ -894,13 +968,13 @@ enum Snapshot {
         func ago(_ minutes: Double) -> Date { now.addingTimeInterval(-minutes * 60) }
         return [
             Dictation(date: ago(2), text: "Can you send me the latest numbers before the meeting this afternoon?",
-                      appName: "Slack", bundleID: "com.tinyspeck.slackmacgap", audioSeconds: 3.4, latencyMs: 132, delivery: .pasted),
+                      appName: "Slack", bundleID: "com.tinyspeck.slackmacgap", audioSeconds: 3.4, latencyMs: 132, delivery: .pasted, peakDb: -36),
             Dictation(date: ago(9), text: "Let's move the standup to 10:30 and skip the retro this week.",
-                      appName: "Messages", bundleID: "com.apple.MobileSMS", audioSeconds: 2.9, latencyMs: 118, delivery: .pasted),
+                      appName: "Messages", bundleID: "com.apple.MobileSMS", audioSeconds: 2.9, latencyMs: 118, delivery: .pasted, peakDb: -38),
             Dictation(date: ago(31), text: "Honestly the new design looks great, but the spacing on the settings page feels a little tight. Can we give the cards more room and bring the headings closer to their content?",
-                      appName: "Notes", bundleID: "com.apple.Notes", audioSeconds: 9.8, latencyMs: 161, delivery: .pasted),
+                      appName: "Notes", bundleID: "com.apple.Notes", audioSeconds: 9.8, latencyMs: 161, delivery: .pasted, peakDb: -34),
             Dictation(date: ago(47), text: "Book a table for four people at seven.",
-                      appName: "Finder", bundleID: "com.apple.finder", audioSeconds: 2.2, latencyMs: 97, delivery: .card),
+                      appName: "Finder", bundleID: "com.apple.finder", audioSeconds: 2.2, latencyMs: 97, delivery: .card, peakDb: -35),
             Dictation(date: ago(60 * 26), text: "Make sure the tests pass before you merge it, and tag me on the pull request.",
                       appName: "Mail", bundleID: "com.apple.mail", audioSeconds: 4.1, latencyMs: 140, delivery: .pasted),
             Dictation(date: ago(60 * 27), text: "Remind me to call the accountant about the invoice tomorrow morning.",
@@ -914,7 +988,7 @@ enum Snapshot {
         var windows: [NSWindow] = []
         for (tab, name) in tabs {
             let view = NSHostingView(rootView: MainView(controller: controller, history: controller.history, tab: tab))
-            let frame = NSRect(x: -20_000, y: -20_000, width: 940, height: tab == .settings ? 1180 : 680)
+            let frame = NSRect(x: -20_000, y: -20_000, width: 940, height: tab == .settings ? 1420 : 680)
             let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: .darkAqua)
             window.contentView = view
@@ -928,7 +1002,17 @@ enum Snapshot {
                     .write(to: directory.appendingPathComponent("\(name).png"))
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        OverlayController.renderPreview(to: directory.appendingPathComponent("pill-live.png")) { model in
+            model.phase = .listening
+            model.levels = [0.8, 0.6, 0.9, 0.4, 0.5, 0.3]
+            model.liveText = "so the idea is that the words show up right here while you're still talking, and the newest ones stay"
+        }
+        OverlayController.renderPreview(to: directory.appendingPathComponent("pill-short.png")) { model in
+            model.phase = .listening
+            model.levels = [0.7, 0.5, 0.8, 0.3, 0.4, 0.2]
+            model.liveText = "Can you send me the"
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             windows.forEach { $0.orderOut(nil) }
             NSApp.terminate(nil)
         }

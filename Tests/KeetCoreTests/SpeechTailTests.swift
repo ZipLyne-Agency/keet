@@ -60,7 +60,7 @@ private func tailStop(_ samples: [Float], releaseMs: Int, policy: TailPolicy = T
     let samples = audio([(-52, 600), (-52, 1000)])
     var tracker = EnergyTracker(sampleRate: 16_000)
     tracker.consume(Array(samples[0..<(600 * 16)]))
-    #expect(tracker.speechThresholdDb >= tracker.noiseFloorDb + 4)
+    #expect(tracker.speechThresholdDb >= tracker.noiseFloorDb + 6)
     #expect(tailStop(samples, releaseMs: 600) - 600 < 100)
 }
 
@@ -69,4 +69,13 @@ private func tailStop(_ samples: [Float], releaseMs: Int, policy: TailPolicy = T
     var tracker = EnergyTracker(sampleRate: 16_000)
     tracker.consume(audio([(-58, 90), (-22, 3000)]))
     #expect(tracker.noiseFloorDb < -50)
+}
+
+@Test func loneNoiseSpikesDontHoldTheTailOpen() {
+    // A quiet microphone: speech only 18 dB over the room, then a room with clicks.
+    var segments: [(db: Float, ms: Int)] = [(-56, 100), (-38, 1500)]
+    for _ in 0..<40 { segments += [(-56, 20), (-46, 10)] }  // a 10 ms spike every 30 ms
+    let samples = audio(segments)
+    let stop = tailStop(samples, releaseMs: 1600)
+    #expect(stop - 1600 < TailPolicy().maximumMs)
 }

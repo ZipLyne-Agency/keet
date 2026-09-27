@@ -19,6 +19,10 @@ final class OverlayModel: ObservableObject {
     /// Per-bar variation so the wave looks like a voice rather than a level meter.
     @Published var jitter: [CGFloat] = Array(repeating: 1, count: 11)
     @Published var copied = false
+    /// Words heard so far, shown in the pill while you talk.
+    @Published var liveText = ""
+    /// Heading on the Copy card.
+    @Published var cardNote = "No text field selected"
 
     func push(level: CGFloat) {
         var next = levels
@@ -36,7 +40,7 @@ final class OverlayModel: ObservableObject {
 private struct Waveform: View {
     let levels: [CGFloat]
     let jitter: [CGFloat]
-    private let bars = 11
+    var bars = 11
 
     var body: some View {
         HStack(spacing: 3) {
@@ -75,18 +79,62 @@ private struct Pill: View {
     @ObservedObject var model: OverlayModel
 
     var body: some View {
+        Group {
+            if model.liveText.isEmpty {
+                compact
+            } else {
+                caption
+            }
+        }
+        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+        .animation(.easeOut(duration: 0.15), value: model.phase)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: model.liveText.isEmpty)
+        .animation(.spring(response: 0.35, dampingFraction: 0.9), value: captionWidth)
+    }
+
+    private var indicator: some View {
         ZStack {
             if model.phase == .transcribing {
                 ThinkingDots().transition(.opacity)
             } else {
-                Waveform(levels: model.levels, jitter: model.jitter).transition(.opacity)
+                Waveform(levels: model.levels, jitter: model.jitter, bars: model.liveText.isEmpty ? 11 : 7)
+                    .transition(.opacity)
             }
         }
-        .frame(width: 104, height: 32)
-        .background(Capsule(style: .continuous).fill(Color(white: 0.06).opacity(0.92)))
-        .overlay(Capsule(style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
-        .animation(.easeOut(duration: 0.15), value: model.phase)
+    }
+
+    private var compact: some View {
+        indicator
+            .frame(width: 104, height: 32)
+            .background(Capsule(style: .continuous).fill(Color(white: 0.06).opacity(0.92)))
+            .overlay(Capsule(style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+    }
+
+    /// Hugs short phrases and grows with the words, up to two lines at full width.
+    private var captionWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        let ideal = (model.liveText as NSString).size(withAttributes: [.font: font]).width + 4
+        return min(max(ideal, 60), OverlayController.captionTextWidth)
+    }
+
+    /// The pill grown into a caption: waveform on the left, newest words on the right.
+    private var caption: some View {
+        HStack(spacing: 12) {
+            indicator.frame(width: 44, height: 24)
+            Text(model.liveText)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white.opacity(0.95))
+                .lineLimit(2)
+                .truncationMode(.head)
+                .frame(width: captionWidth, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .animation(.easeOut(duration: 0.12), value: model.liveText)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(white: 0.06).opacity(0.94)))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+        .transition(.scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
     }
 }
 
@@ -101,7 +149,7 @@ private struct ResultCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "text.cursor")
                     .font(.system(size: 10, weight: .semibold))
-                Text("No text field selected")
+                Text(model.cardNote)
                     .font(.system(size: 11, weight: .medium))
                 Spacer(minLength: 8)
                 Button(action: onClose) {
@@ -221,14 +269,19 @@ private final class FirstMouseHostingView<Content: View>: NSHostingView<Content>
 @MainActor
 final class OverlayController {
     static let margin: CGFloat = 16
-    private static let pillSize = NSSize(width: 104 + 2 * margin, height: 32 + 2 * margin)
+    static let captionTextWidth: CGFloat = 460
+    /// The listening panel is sized for the widest caption up front, so the pill can
+    /// grow without the window resizing. It ignores the mouse, so the empty part of it
+    /// never blocks clicks.
+    static let listeningSize = NSSize(width: captionTextWidth + 44 + 12 + 32 + 2 * margin + 40, height: 140)
 
     let model = OverlayModel()
     var onCopy: (String) -> Void = { _ in }
-    /// Where the text is going. Falls back to the screen under the pointer.
-    var focusedScreen: () -> NSScreen? = { nil }
 
-    private var panel: OverlayPanel?
+    /// One panel per screen, all showing the same model, so the pill is visible on
+    /// whichever display you're looking at. (Following only the focused window's
+    /// screen hid it entirely when that display couldn't show floating windows.)
+    private var panels: [OverlayPanel] = []
     private var orderOutWork: DispatchWorkItem?
     private var dismissTimer: Timer?
 
@@ -253,7 +306,8 @@ final class OverlayController {
     func showListening() {
         dismissTimer?.invalidate()
         model.resetLevels()
-        present(size: Self.pillSize, interactive: false)
+        model.liveText = ""
+        present(size: Self.listeningSize, interactive: false)
         model.phase = .listening
     }
 
@@ -262,8 +316,15 @@ final class OverlayController {
         model.phase = .transcribing
     }
 
-    func showResult(_ text: String) {
+    func setLiveText(_ text: String) {
+        guard model.phase == .listening || model.phase == .transcribing else { return }
+        model.liveText = text
+    }
+
+    func showResult(_ text: String, note: String = "No text field selected") {
         model.copied = false
+        model.cardNote = note
+        model.liveText = ""
         let measure = NSHostingView(
             rootView: ResultCard(text: text, model: model, onCopy: {}, onClose: {}))
         let fitting = measure.fittingSize
@@ -279,8 +340,8 @@ final class OverlayController {
         model.phase = .hidden
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.model.phase == .hidden else { return }
-            self.panel?.orderOut(nil)
-            self.panel = nil
+            self.panels.forEach { $0.orderOut(nil) }
+            self.panels = []
         }
         orderOutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
@@ -304,7 +365,7 @@ final class OverlayController {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 // Keep the card while the pointer rests on it.
-                if !force, self.panel?.frame.contains(NSEvent.mouseLocation) == true {
+                if !force, self.panels.contains(where: { $0.frame.contains(NSEvent.mouseLocation) }) {
                     self.scheduleDismiss(after: 2)
                 } else {
                     self.hide()
@@ -315,20 +376,47 @@ final class OverlayController {
 
     private func present(size: NSSize, interactive: Bool) {
         orderOutWork?.cancel()
-        var screen = focusedScreen()
-            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
-            ?? NSScreen.main
+        var screens = NSScreen.screens
         if let forced = ProcessInfo.processInfo.environment["KEET_TEST_SCREEN"].flatMap(Int.init),
-           NSScreen.screens.indices.contains(forced) {
-            screen = NSScreen.screens[forced]
+           screens.indices.contains(forced) {
+            screens = [screens[forced]]
         }
-        guard let visible = screen?.visibleFrame else { return }
-        let panel = self.panel ?? makePanel()
-        self.panel = panel
-        let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 6)
-        panel.setFrame(NSRect(origin: origin, size: size), display: false)
-        panel.ignoresMouseEvents = !interactive
-        panel.orderFrontRegardless()
-        overlayLog.notice("present \(NSStringFromRect(panel.frame), privacy: .public) activeSpace=\(panel.isOnActiveSpace)")
+        if panels.count != screens.count {
+            panels.forEach { $0.orderOut(nil) }
+            panels = screens.map { _ in makePanel() }
+        }
+        for (panel, screen) in zip(panels, screens) {
+            let visible = screen.visibleFrame
+            let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 6)
+            panel.setFrame(NSRect(origin: origin, size: size), display: false)
+            panel.ignoresMouseEvents = !interactive
+            panel.orderFrontRegardless()
+        }
+        overlayLog.notice("present on \(screens.count) screens, \(Int(size.width))x\(Int(size.height))")
+    }
+}
+
+// MARK: - Snapshots
+
+extension OverlayController {
+    /// Renders the overlay in a given state off screen (design review, docs).
+    static func renderPreview(to url: URL, configure: (OverlayModel) -> Void) {
+        let model = OverlayModel()
+        configure(model)
+        let view = NSHostingView(rootView: OverlayRoot(model: model, onCopy: {}, onClose: {}))
+        let size = NSSize(width: listeningSize.width, height: 140)
+        let window = NSWindow(
+            contentRect: NSRect(x: -20_000, y: -20_000, width: size.width, height: size.height),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.backgroundColor = NSColor(white: 0.42, alpha: 1)
+        window.contentView = view
+        window.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            view.layoutSubtreeIfNeeded()
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: url)
+            window.orderOut(nil)
+        }
     }
 }

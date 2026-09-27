@@ -64,10 +64,20 @@ enum HotkeyChoice: Int, CaseIterable {
 /// Watches the keyboard with a listen-only event tap. It never blocks or alters
 /// input, so a slow or stuck Keet can't interfere with typing.
 final class HotkeyMonitor {
+    enum CancelReason {
+        /// Another key, click or modifier early in the hold: it was a shortcut.
+        case shortcut
+        /// Escape while holding.
+        case escape
+    }
+
     var choice: HotkeyChoice
     var onPress: () -> Void = {}
     var onRelease: () -> Void = {}
-    var onCancel: () -> Void = {}
+    var onCancel: (CancelReason) -> Void = { _ in }
+    /// After holding this long it's a dictation, not a shortcut: stray keys, clicks and
+    /// modifiers no longer cancel it. Only Escape does.
+    var shortcutWindow: TimeInterval = 0.6
     /// Escape pressed while not dictating (used to dismiss the result card).
     var onEscape: () -> Void = {}
     /// Any key or click while not holding: you've moved on, so a dictation still
@@ -78,6 +88,15 @@ final class HotkeyMonitor {
     private var source: CFRunLoopSource?
     private var held = false
     private var cancelled = false
+    private var pressedAt: CFAbsoluteTime = 0
+
+    private var inShortcutWindow: Bool { CFAbsoluteTimeGetCurrent() - pressedAt < shortcutWindow }
+
+    private func cancel(_ reason: CancelReason) {
+        guard !cancelled else { return }
+        cancelled = true
+        onCancel(reason)
+    }
 
     init(choice: HotkeyChoice) { self.choice = choice }
 
@@ -128,23 +147,25 @@ final class HotkeyMonitor {
                     guard !choice.othersHeld(flags), !IsSecureEventInputEnabled() else { return }
                     held = true
                     cancelled = false
+                    pressedAt = CFAbsoluteTimeGetCurrent()
                     onPress()
                 } else if !down, held {
                     held = false
                     if !cancelled { onRelease() }
                 }
-            } else if held, !cancelled, choice.othersHeld(flags) {
-                cancelled = true
-                onCancel()
+            } else if held, choice.othersHeld(flags), inShortcutWindow {
+                cancel(.shortcut)
             }
 
         case .keyDown:
             if held {
-                // Option+arrow, Option+letter, Escape: any key means this isn't dictation.
-                if !cancelled {
-                    cancelled = true
-                    onCancel()
+                if event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Escape) {
+                    cancel(.escape)
+                } else if inShortcutWindow {
+                    // Option+arrow, Option+letter: a shortcut, not dictation.
+                    cancel(.shortcut)
                 }
+                // Later keys are ignored: a bumped key must not throw away minutes of speech.
             } else {
                 // Our own Command-V paste arrives here too; it isn't the user.
                 if event.getIntegerValueField(.eventSourceUserData) != TextInserter.syntheticEventTag {
@@ -154,10 +175,9 @@ final class HotkeyMonitor {
             }
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            if held, !cancelled {
-                cancelled = true
-                onCancel()
-            } else if !held {
+            if held {
+                if inShortcutWindow { cancel(.shortcut) }
+            } else {
                 onActivity()
             }
 

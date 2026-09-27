@@ -32,9 +32,19 @@ final class AppController: ObservableObject {
     @Published private(set) var micTestLevel: Float = 0
     /// The app you were in before switching to Keet; history's "Paste into" targets it.
     @Published private(set) var lastExternalApp: NSRunningApplication?
+    /// Play a chime when a hold becomes a dictation.
+    @Published var startSoundOn: Bool = UserDefaults.standard.object(forKey: "startSound") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(startSoundOn, forKey: "startSound") }
+    }
+    @Published private(set) var micTestPeakDb: Float = -120
+    /// Show words in the pill while you talk.
+    @Published var livePreview: Bool = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(livePreview, forKey: "livePreview") }
+    }
 
     let history: HistoryStore
     let overlay = OverlayController()
+    private let startSound = StartSound()
     let hotkey: HotkeyMonitor
     private let inserter = TextInserter()
     private let transcriber = Transcriber()
@@ -44,6 +54,7 @@ final class AppController: ObservableObject {
     private var deviceWatcher: AudioDeviceWatcher?
     private var activationObserver: NSObjectProtocol?
     private var micTestTimer: DispatchSourceTimer?
+    private var liveTask: Task<Void, Never>?
 
     /// Holds shorter than this are treated as a stray tap of the key.
     private let minimumHold: TimeInterval = 0.16
@@ -64,6 +75,8 @@ final class AppController: ObservableObject {
         var pump: DispatchSourceTimer?
         var finished = false
         var lastMeterPush: CFAbsoluteTime = 0
+        /// Escape on a long dictation: transcribe and keep it, but don't paste.
+        var keepOnly = false
 
         init(id: Int, sampleRate: Double) {
             self.id = id
@@ -85,14 +98,13 @@ final class AppController: ObservableObject {
 
         hotkey.onPress = { [weak self] in self?.keyPressed() }
         hotkey.onRelease = { [weak self] in self?.keyReleased() }
-        hotkey.onCancel = { [weak self] in self?.cancel() }
+        hotkey.onCancel = { [weak self] reason in self?.cancel(reason) }
         hotkey.onEscape = { [weak self] in
             guard let self, self.overlay.isShowingResult else { return }
             self.overlay.hide()
         }
         hotkey.onActivity = { [weak self] in self?.userMovedOn() }
         overlay.onCopy = { TextInserter.copyToClipboard($0) }
-        overlay.focusedScreen = { [inserter] in inserter.focusedWindowScreen() }
         recorder.onInterruption = { [weak self] in
             DispatchQueue.main.async { self?.keyReleased() }
         }
@@ -135,7 +147,7 @@ final class AppController: ObservableObject {
     // MARK: - Settings
 
     func setHotkey(_ choice: HotkeyChoice) {
-        cancel()
+        cancel(.shortcut)
         hotkey.choice = choice
         hotkeyChoice = choice
         UserDefaults.standard.set(choice.rawValue, forKey: "hotkey")
@@ -150,6 +162,24 @@ final class AppController: ObservableObject {
             recorder.preferredDeviceUID = uid
             if !recorder.isRunning { try? recorder.prepare() }
         }
+    }
+
+    /// The device dictation will use: the chosen one if it's connected, else the default.
+    var activeMic: InputDevice? {
+        if let uid = selectedMicUID, let device = inputDevices.first(where: { $0.uid == uid }) { return device }
+        return systemDefaultMic
+    }
+
+    func inputVolume() -> Float? { activeMic.flatMap { AudioDevices.inputVolume($0.id) } }
+
+    func setInputVolume(_ volume: Float) {
+        if let device = activeMic { AudioDevices.setInputVolume(device.id, volume) }
+    }
+
+    /// Median peak level of recent dictations, in dBFS.
+    var recentPeakDb: Float? {
+        let peaks = history.entries.prefix(20).compactMap(\.peakDb).sorted()
+        return peaks.count >= 3 ? peaks[peaks.count / 2] : nil
     }
 
     var activeMicName: String {
@@ -202,9 +232,11 @@ final class AppController: ObservableObject {
                     read = count
                 }
                 let level = tracker.meterLevel
+                let recentPeak = tracker.framesDb.suffix(30).max() ?? -120
                 let done = CFAbsoluteTimeGetCurrent() - started > 10
                 DispatchQueue.main.async {
                     self?.micTestLevel = level
+                    self?.micTestPeakDb = recentPeak
                     if done { self?.stopMicTest() }
                 }
             }
@@ -217,6 +249,7 @@ final class AppController: ObservableObject {
         guard isTestingMic else { return }
         isTestingMic = false
         micTestLevel = 0
+        micTestPeakDb = -120
         audioQueue.async { [weak self, recorder] in
             self?.micTestTimer?.cancel()
             self?.micTestTimer = nil
@@ -265,7 +298,7 @@ final class AppController: ObservableObject {
                 try recorder.start()
             } catch {
                 log.error("microphone start failed: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async { self.cancel() }
+                DispatchQueue.main.async { self.cancel(.shortcut) }
                 return
             }
             // The device rate is known only once the engine is built.
@@ -280,6 +313,30 @@ final class AppController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + pillDelay) { [weak self] in
             guard let self, self.session === current else { return }
             self.overlay.showListening()
+            if self.startSoundOn { self.startSound.play() }
+        }
+        if livePreview { startLivePreview(current) }
+    }
+
+    /// While the key is held, re-transcribes the last 14 seconds a few times a second
+    /// and shows the newest words in the pill. The text you get when you let go still
+    /// comes from one full pass over the whole recording.
+    private func startLivePreview(_ current: Session) {
+        liveTask?.cancel()
+        liveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            while !Task.isCancelled, let self, self.session === current, self.phase == .listening {
+                let rate = self.recorder.sampleRate
+                let count = self.recorder.capturedCount
+                let start = max(0, count - Int(rate * 14))
+                if count - start > Int(rate * 0.4),
+                   let pcm = try? self.transcriber.resample(self.recorder.samples(from: start, to: count), from: rate),
+                   let text = try? await self.transcriber.transcribe(pcm),
+                   !Task.isCancelled, self.session === current, self.phase == .listening, !text.isEmpty {
+                    self.overlay.setLiveText(text)
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
         }
     }
 
@@ -287,8 +344,9 @@ final class AppController: ObservableObject {
         guard let current = session else { return }
         let held = CFAbsoluteTimeGetCurrent() - current.pressed
         log.notice("session \(current.id): key up after \(Int(held * 1000)) ms")
+        liveTask?.cancel()
         if held < minimumHold {
-            cancel()
+            cancel(.shortcut)
             return
         }
         audioQueue.async {
@@ -307,8 +365,19 @@ final class AppController: ObservableObject {
         }
     }
 
-    private func cancel() {
+    private func cancel(_ reason: HotkeyMonitor.CancelReason = .shortcut) {
         guard let current = session else { return }
+        liveTask?.cancel()
+        if reason == .escape, CFAbsoluteTimeGetCurrent() - current.pressed >= 2 {
+            // Never throw away real speech: transcribe it, keep it in History, show it
+            // on the card, but don't paste.
+            log.notice("session \(current.id): escape, keeping the speech")
+            audioQueue.async { [weak self] in
+                current.keepOnly = true
+                self?.finish(current)
+            }
+            return
+        }
         log.notice("session \(current.id): cancelled")
         session = nil
         phase = .idle
@@ -340,6 +409,12 @@ final class AppController: ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.overlay.push(level: level) }
         }
 
+        if recorder.isNearlyFull {
+            log.notice("session \(current.id): reached the recording limit, transcribing what was said")
+            finish(current)
+            return
+        }
+
         guard let released = current.released else { return }
         let elapsedMs = Int((now - released) * 1000)
         guard tail.shouldStop(elapsedMs: elapsedMs, trailingQuietMs: current.tracker.trailingQuietMs) else { return }
@@ -359,12 +434,15 @@ final class AppController: ObservableObject {
         let startLatency = current.firstAudio.map { Int(($0 - current.pressed) * 1000) } ?? -1
         let t = current.tracker
         log.notice("session \(current.id): first audio after \(startLatency) ms, tail \(tailMs) ms, \(samples.count) samples, noise \(Int(t.noiseFloorDb)) dB, threshold \(Int(t.speechThresholdDb)) dB, peak \(Int(t.peakDb)) dB")
+        let peak = t.peakDb
         DispatchQueue.main.async { [weak self] in
-            self?.transcribe(samples, rate: rate, released: released, session: current)
+            self?.transcribe(samples, rate: rate, released: released, peakDb: peak, session: current)
         }
     }
 
-    private func transcribe(_ samples: [Float], rate: Double, released: CFAbsoluteTime, session current: Session) {
+    private func transcribe(
+        _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, session current: Session
+    ) {
         let isLatest = session === current || session == nil
         if session === current { session = nil }
         if isLatest {
@@ -387,17 +465,35 @@ final class AppController: ObservableObject {
             }
             let transcribeMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             let latencyMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
-            self.deliver(text, ownsOverlay: isLatest, audioSeconds: Double(samples.count) / max(rate, 1), latencyMs: latencyMs)
+            let keepOnly = await self.keepOnly(current)
+            self.deliver(text, ownsOverlay: isLatest, audioSeconds: Double(samples.count) / max(rate, 1),
+                         latencyMs: latencyMs, peakDb: peakDb, keepOnly: keepOnly)
             log.notice("session \(current.id): transcribe \(transcribeMs) ms, release to text \(latencyMs) ms")
         }
     }
 
-    private func deliver(_ text: String, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int) {
+    private nonisolated func keepOnly(_ current: Session) async -> Bool {
+        await withCheckedContinuation { continuation in
+            audioQueue.async { continuation.resume(returning: current.keepOnly) }
+        }
+    }
+
+    private func deliver(
+        _ text: String, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float, keepOnly: Bool
+    ) {
         // A newer dictation may already be showing its pill; leave that alone.
         let ownsOverlay = ownsOverlay && session == nil
         if ownsOverlay { phase = .idle }
         guard !text.isEmpty else {
             if ownsOverlay { overlay.hide() }
+            return
+        }
+        if keepOnly {
+            if ownsOverlay { overlay.showResult(text, note: "Cancelled, not pasted. Saved in History.") }
+            let app = NSWorkspace.shared.frontmostApplication
+            history.add(Dictation(
+                date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
+                audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb))
             return
         }
         let target = inserter.currentTarget()
@@ -417,6 +513,6 @@ final class AppController: ObservableObject {
         }
         history.add(Dictation(
             date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
-            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery))
+            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb))
     }
 }

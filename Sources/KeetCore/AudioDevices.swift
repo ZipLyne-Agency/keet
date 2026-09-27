@@ -50,6 +50,48 @@ public enum AudioDevices {
         inputs().first { $0.uid == uid }
     }
 
+    /// The device's input volume, 0...1, if it has one macOS can read.
+    public static func inputVolume(_ id: AudioDeviceID) -> Float? {
+        for element in volumeElements(id) {
+            var address = volumeAddress(element)
+            var value: Float32 = 0
+            var size = UInt32(MemoryLayout<Float32>.size)
+            if AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr { return value }
+        }
+        return nil
+    }
+
+    /// Sets the input volume on every channel that has one. Returns false if none can be set.
+    @discardableResult
+    public static func setInputVolume(_ id: AudioDeviceID, _ volume: Float) -> Bool {
+        var changed = false
+        for element in volumeElements(id) {
+            var address = volumeAddress(element)
+            var settable = DarwinBoolean(false)
+            guard AudioObjectIsPropertySettable(id, &address, &settable) == noErr, settable.boolValue else { continue }
+            var value = Float32(max(0, min(1, volume)))
+            if AudioObjectSetPropertyData(id, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &value) == noErr {
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private static func volumeAddress(_ element: UInt32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar, mScope: kAudioObjectPropertyScopeInput, mElement: element)
+    }
+
+    /// The main element if it has a volume, otherwise the individual channels.
+    private static func volumeElements(_ id: AudioDeviceID) -> [UInt32] {
+        var main = volumeAddress(kAudioObjectPropertyElementMain)
+        if AudioObjectHasProperty(id, &main) { return [kAudioObjectPropertyElementMain] }
+        return (1...UInt32(max(1, inputChannels(id)))).filter {
+            var address = volumeAddress($0)
+            return AudioObjectHasProperty(id, &address)
+        }
+    }
+
     private static func inputChannels(_ id: AudioDeviceID) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,

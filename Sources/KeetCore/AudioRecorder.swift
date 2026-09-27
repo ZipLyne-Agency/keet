@@ -52,8 +52,9 @@ public final class AudioRecorder: @unchecked Sendable {
         public var errorDescription: String? { "No microphone is available." }
     }
 
-    /// Longest recording kept, in seconds.
-    public static let maximumSeconds = 600.0
+    /// Longest recording, in seconds. Memory is only used as audio arrives
+    /// (about 11 MB a minute at 48 kHz).
+    public static let maximumSeconds = 1800.0
 
     public private(set) var sampleRate: Double = 48_000
     public private(set) var isRunning = false
@@ -73,6 +74,7 @@ public final class AudioRecorder: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var store: SampleStore?
     private var needsRebuild = true
+    private var builtFormat: AVAudioFormat?
     private var configObserver: NSObjectProtocol?
 
     // Test injection: feed a file in real time instead of the microphone.
@@ -130,8 +132,13 @@ public final class AudioRecorder: @unchecked Sendable {
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in
+        ) { [weak self, weak engine] _ in
             guard let self else { return }
+            // Choosing a specific microphone makes the engine post this about 145 ms
+            // after it starts, while it keeps running and capturing normally. Only a
+            // change that actually stopped the engine (a mic unplugged mid-dictation)
+            // needs handling.
+            guard engine?.isRunning != true else { return }
             self.needsRebuild = true
             if self.isRunning { self.onInterruption?() }
         }
@@ -139,6 +146,7 @@ public final class AudioRecorder: @unchecked Sendable {
         self.engine = engine
         self.store = store
         self.sampleRate = format.sampleRate
+        builtFormat = format
         needsRebuild = false
     }
 
@@ -150,6 +158,12 @@ public final class AudioRecorder: @unchecked Sendable {
             return
         }
         try prepare()
+        // The device's format can change while idle (another app switched its
+        // sample rate); an engine built for the old format would mislabel the audio.
+        if let engine, let builtFormat, engine.inputNode.outputFormat(forBus: 0) != builtFormat {
+            needsRebuild = true
+            try prepare()
+        }
         store?.reset()
         do {
             try engine?.start()
@@ -184,6 +198,16 @@ public final class AudioRecorder: @unchecked Sendable {
     }
 
     public var capturedCount: Int { store?.count ?? 0 }
+
+    /// Within a second of the maximum length; the caller should finish up.
+    public var isNearlyFull: Bool {
+        guard let store else { return false }
+        return store.count >= store.capacity - Int(sampleRate)
+    }
+
+    /// Whether the underlying engine is actually running (it can stop on its own
+    /// when the hardware configuration changes).
+    public var engineIsRunning: Bool { engine?.isRunning ?? false }
 
     public func samples(from start: Int, to end: Int) -> [Float] {
         store?.copy(from: start, to: end) ?? []

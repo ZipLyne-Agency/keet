@@ -8,6 +8,8 @@ struct Dictation: Codable, Identifiable, Equatable {
         case pasted
         /// No field had focus; shown on the Copy card.
         case card
+        /// Escape pressed on a long dictation: kept, not pasted.
+        case cancelled
     }
 
     var id = UUID()
@@ -20,6 +22,8 @@ struct Dictation: Codable, Identifiable, Equatable {
     /// Key release to text delivered.
     var latencyMs: Int
     var delivery: Delivery
+    /// Loudest 10 ms of the recording, in dBFS. Older entries don't have it.
+    var peakDb: Float?
 
     var words: Int { text.split(whereSeparator: \.isWhitespace).count }
 }

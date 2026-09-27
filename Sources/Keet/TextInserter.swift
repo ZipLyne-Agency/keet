@@ -108,28 +108,6 @@ final class TextInserter {
         "AXCollection", "AXDockItem",
     ]
 
-    /// The screen holding the focused window of the frontmost app: where the text
-    /// is going, which can differ from where the pointer is.
-    func focusedWindowScreen() -> NSScreen? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(appElement, 0.1)
-        var window: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &window) == .success,
-              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
-        var posValue: CFTypeRef?, sizeValue: CFTypeRef?
-        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXPositionAttribute as CFString, &posValue)
-        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXSizeAttribute as CFString, &sizeValue)
-        var origin = CGPoint.zero, size = CGSize.zero
-        guard let posValue, let sizeValue,
-              AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else { return nil }
-        // Accessibility uses top-left coordinates from the primary screen; AppKit uses bottom-left.
-        guard let primary = NSScreen.screens.first else { return nil }
-        let center = NSPoint(x: origin.x + size.width / 2, y: primary.frame.maxY - (origin.y + size.height / 2))
-        return NSScreen.screens.first { $0.frame.contains(center) }
-    }
-
     /// Pastes through the clipboard (the one method every app accepts), then puts
     /// back whatever was on the clipboard before.
     func paste(_ text: String) {

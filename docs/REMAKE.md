@@ -8,16 +8,20 @@ and each design decision with the measurement behind it.
 
 Five behaviors define it. Everything else serves these.
 
-1. **Hold a key to talk.** Left Option by default. Holding it alone starts recording;
-   Option with any other key, a click, or another modifier is left alone as a normal shortcut.
-2. **Show that it's listening.** A small pill with a live waveform at the bottom of the
-   screen you're typing on.
+1. **Hold a key to talk.** Left Option by default. Holding it alone starts recording.
+   Option with another key, a click, or another modifier in the first 0.6 seconds is
+   left alone as a normal shortcut. After that it's a dictation, and nothing but letting
+   go (or Escape) ends it.
+2. **Show that it's listening.** A pill at the bottom of the screen you're typing on,
+   with a live waveform and the words as you say them.
 3. **Put the text where the cursor is.** If nothing can take text, show it on a card with
    a Copy button instead of losing it.
 4. **Never drop the last word.** Letting go of the key a moment before the last word ends
    must not cut it off.
-5. **Feel instant.** Capture starts within a few tens of milliseconds of the key press,
-   and the text lands shortly after the key comes up.
+5. **Feel instant.** Capture starts within tens of milliseconds of the key press, and
+   the text lands shortly after the key comes up.
+6. **Never lose a long dictation.** Four minutes of talking must survive a bumped key, a
+   click, or even Escape.
 
 ## What you need
 
@@ -97,8 +101,9 @@ split into 15-second windows that overlap by 2 seconds and are merged.
 |---|---|
 | Word error rate, LibriSpeech test-clean (FluidAudio's benchmark, int8, batch) | 1.68% aggregate |
 | Transcribing 1 to 6 seconds of speech (M5 Max) | 32 to 66 ms |
+| Transcribing 4 minutes 11 seconds of speech in one pass (700 words) | 1.35 s, 1.4% word error rate |
 | First load after installing or updating Keet (Core ML compiles for the Neural Engine) | 8.2 to 8.7 s |
-| Every load after that (compiled plan is cached) | 0.12 to 0.14 s |
+| Every load after that (compiled plan is cached) | 0.11 to 0.14 s |
 
 Keet runs one dummy transcription at launch so the first real dictation doesn't pay any
 one-time setup cost.
@@ -110,11 +115,13 @@ one-time setup cost.
    frontmost app to build its accessibility tree (Electron and Chrome only do so when
    asked).
 2. **Capture.** An `AVAudioSinkNode` receives every hardware cycle (about 10 ms) and copies
-   channel 0 into a preallocated buffer, lock-free. On a real USB microphone the first
-   audio arrived 23 to 36 ms after the key press.
+   channel 0 into a preallocated buffer, lock-free. Measured on real USB microphones, the
+   first audio arrived 23 to 36 ms after the key press on the system default input and 60
+   to 69 ms on a specifically chosen one.
 3. **Pill.** 160 ms after the press, if the key is still down, the pill appears. A pump
    on the audio queue reads new audio every 10 ms, measures loudness in 10 ms frames,
-   and feeds the waveform.
+   and feeds the waveform. From 600 ms in, the live preview starts putting words in the
+   pill.
 4. **Key up.** The recorder keeps going. Every 10 ms the tail rule checks whether the
    speaker has finished (next section). Typing or clicking also ends it at once.
 5. **Transcribe.** The recording is resampled to 16 kHz mono and transcribed.
@@ -169,21 +176,100 @@ So after the key comes up, Keet keeps recording and stops at the first of these:
 - **The threshold** is room noise plus 9 dB, pulled down toward 18 dB below the loudest
   speech so soft endings still count, but never closer than 4 dB to the room noise.
 
-That last clamp matters. An earlier version let the threshold fall below the noise when
-a recording held little speech, so the room never read as quiet and the tail ran to its
-cap. On a real microphone that showed up as 700 ms tails.
+- **Speech** means two or more loud frames in a row. A lone 10 ms spike is room noise
+  and doesn't restart the quiet count.
+
+The clamp and the two-frame rule came from real microphones. An earlier version let the
+threshold fall below the noise when a recording held little speech, so the room never
+read as quiet and the tail ran to its cap (700 ms tails). A quiet USB microphone, with
+speech peaking around −36 dB over a −54 dB room, still hit the cap on some dictations
+with the threshold only 4 dB above the noise, because noise spikes kept crossing it.
 
 `keet-bench tail` checks the rule end to end: each clip gets room noise mixed in, the
 key is released 40 ms before the last word ends, the tail rule decides where capture
 stops, and the result is transcribed.
 
-| Room noise | Last word kept | Tail after release |
+| Room | Last word kept | Tail after release |
 |---|---|---|
-| −60 dB (quiet room) | 12 of 12 | 190 ms (40 ms of word plus 150 ms of quiet) |
-| −48 dB (noisy room) | 12 of 12 | 40 ms |
+| Quiet room, noise at −60 dB | 12 of 12 | about 190 ms (40 ms of word plus 150 ms of quiet) |
+| Noisy room, noise at −48 dB | 11 of 12 | about 170 ms |
+| Quiet microphone: speech 20 dB lower, noise at −54 dB | 10 of 12 | 40 to 170 ms |
+
+Every miss above is either the robotic "Samantha" clip, which the model garbles in every
+test, or "milk" heard as "mill" at the lowest level. In that case the capture ran past
+the end of the word; the model simply didn't hear the faint "k" through the noise.
 
 If you had already stopped talking when you let go, the quiet is already there and
 capture stops 40 ms after release.
+
+### Long dictations
+
+Three rules keep a long dictation from being lost:
+
+- **Shortcut detection only at the start.** Other keys, clicks and modifiers cancel only
+  in the first 0.6 seconds, when they mean you were pressing an Option shortcut. After
+  that they're ignored.
+- **Escape keeps real speech.** Escape within the first 2 seconds cancels quietly. After
+  that, Keet still transcribes what you said, shows it on the Copy card, and saves it in
+  History marked "Cancelled", without pasting it.
+- **A 30-minute buffer.** Memory is used only as audio arrives, about 11 MB a minute at
+  48 kHz. If a recording reaches the limit, Keet transcribes it as if you'd let go.
+
+The offline encoder sees 15 seconds at a time, so longer recordings are split into
+15-second windows overlapping by 2 seconds and merged. A 4 minute 11 second recording of
+700 spoken words came back with 10 word errors (1.4%) in 1.35 s, ending on the right
+words. Including the robotic "Samantha" voice pushed a 4 minute 36 second run to 16.4%,
+all of it from that voice.
+
+### Words as you speak
+
+While the key is down, Keet re-transcribes the most recent 14 seconds of audio about
+three times a second and shows the result in the pill, which grows from a waveform into
+a caption. It hugs short phrases, wraps to two lines, and drops the oldest words off
+the front. The text you get when you let go still comes from one full pass over the
+whole recording, so the preview never affects accuracy. It can be turned off in
+Settings.
+
+### Choosing a microphone
+
+Keet lists every input device through CoreAudio and binds its engine to the one you pick
+by setting `kAudioOutputUnitProperty_CurrentDevice` on the input node. When a specific
+device is set this way, `AVAudioEngine` posts `AVAudioEngineConfigurationChange` about
+145 ms after starting, while it keeps running and capturing normally (confirmed on three
+USB and built-in microphones with the `KEET_MIC_PROBE` diagnostic). Treating that notice
+as "the microphone went away" ended every dictation at 145 ms. Keet only reacts when the
+engine has actually stopped. It also rebuilds the engine when devices come and go or
+the input's audio format changed while idle.
+
+### How loud you need to be
+
+Most wrong words come from quiet audio, not the model. `keet-bench noise` plays the test
+clips at different levels over −54 dB of room noise and scores the transcripts:
+
+| Speech peak | Word errors as recorded | With the volume raised afterwards |
+|---|---|---|
+| −12 dB | 0% | 0% |
+| −24 dB | 3% | 3% |
+| −30 dB | 1% | 2% |
+| −36 dB | 11% | 12% |
+| −42 dB | 30% | 23% |
+
+Raising the volume in software after recording doesn't help, because it raises the room
+noise with it; what matters is how far the voice sits above the room. The first real
+user's dictations peaked at a median of −36 dB on a USB microphone set to 37% input
+volume, right where errors climb. So Settings has an input volume slider for the
+microphone in use (CoreAudio `kAudioDevicePropertyVolumeScalar`, input scope), a test
+meter that shows the peak in dB, and a note when recent dictations have been quiet. Each
+dictation's peak level is stored in History for that note. Aim for peaks between −20 and
+−10 dB.
+
+### Knowing it's listening
+
+When a hold becomes a dictation (160 ms in, the same moment the pill appears), Keet
+plays a soft two-note chime, D6 then G6, about 100 ms long, synthesized in code. Waiting
+160 ms keeps Option shortcuts silent. The chime reaches the microphone, so it was tested:
+mixed into spoken clips at −30 dB, louder than the speech it preceded, it added no words
+to any transcript. It can be turned off in Settings.
 
 ### Starting fast
 
@@ -254,8 +340,8 @@ without a Dock icon. It shows a Dock icon only while its window is open.
 ### History
 
 Dictations are stored in `~/Library/Application Support/Keet/history.json`: text, time,
-the app it went to, recording length, key-release-to-text time, and whether it was pasted
-or shown on the card. Up to 10,000 are kept. Turning off **Keep history on this Mac**
+the app it went to, recording length, key-release-to-text time, and whether it was
+pasted, shown on the card, or cancelled with Escape. Up to 10,000 are kept. Turning off **Keep history on this Mac**
 deletes the file and keeps entries in memory until Keet quits.
 
 ## Build it
@@ -281,7 +367,7 @@ If you fork Keet, change `CFBundleIdentifier` in `Resources/Info.plist`.
 scripts/make-test-clips.sh ~/keet-clips      # 12 spoken sentences in 10 macOS voices
 .build/release/keet-bench transcribe ~/keet-clips/*.wav
 .build/release/keet-bench lastword ~/keet-clips
-.build/release/keet-bench tail ~/keet-clips -60
+.build/release/keet-bench tail ~/keet-clips -60          # room noise dB, optional speech gain dB
 .build/release/keet-bench mic 3              # needs microphone permission for your terminal
 ```
 
@@ -312,7 +398,10 @@ affect normal use:
 | `KEET_SKIP_MODEL=1` | Don't load the model |
 | `KEET_DEMO_CARD=<text>` | Show the Copy card at launch |
 | `KEET_TEST_SCREEN=<n>` | Put the overlay on screen `n` |
-| `KEET_SNAPSHOT=<dir>` | Render the window with sample data to PNGs and quit |
+| `KEET_SNAPSHOT=<dir>` | Render the window and the pill with sample data to PNGs and quit |
+| `KEET_MIC_PROBE=<file>` | Record 3 seconds from every input device and write what the engine did |
+
+`keet-bench noise <clips> [noise dB] [peak dB...]` gives word error rates by speech level.
 
 `scripts/drive.swift` posts synthetic key events, for example
 `swift scripts/drive.swift hold 61 2000` holds Right Option for two seconds. Test with a
@@ -367,8 +456,8 @@ their microphone is in use. Pick the Mac's built-in or a USB microphone in Setti
 ## Known limits
 
 - English only.
-- No live text while you talk; the text arrives when you let go. The unified model can
-  stream, so this could be added.
+- The live words are a preview of the last 14 seconds; the final text arrives when you
+  let go. On a 4-minute dictation that final pass takes about 1.4 s.
 - If you press Enter within a few hundred milliseconds of letting go, the Enter can reach
   the app before the paste does.
 - Focus detection is a heuristic. It is tested in TextEdit, Finder and terminals; other
