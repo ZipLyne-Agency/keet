@@ -9,8 +9,8 @@ Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio). Tran
 few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within about
 30 ms of pressing the key.
 
-- **Hold to talk.** A pill at the bottom of the screen shows a live waveform and the
-  words as you say them.
+- **Hold to talk.** A pill at the bottom of the screen shows a live waveform (and,
+  optionally, the words as you say them).
 - **Talk for as long as you like.** A bumped key or a click can't end a long dictation,
   and even Escape keeps what you said (in History, unpasted).
 - **The last word always makes it.** Keet keeps listening for a moment after you let go,

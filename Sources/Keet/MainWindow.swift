@@ -807,7 +807,7 @@ private struct SettingsPage: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.warning)
-                    Text("Your voice has been only about \(Int(gap.rounded())) dB above the room noise. That gap decides accuracy: at 18 dB about one word in ten comes out wrong, at 30 dB or more almost none. Get closer to the microphone and keep Reduce background noise on. Raising the input volume doesn't help; it lifts the noise too.")
+                    Text("Your voice has been only about \(Int(gap.rounded())) dB above the room noise. That gap decides accuracy: at 18 dB about one word in ten comes out wrong, at 30 dB or more almost none. Get closer to the microphone and speak into its front. Raising the input volume doesn't help; it lifts the noise too.")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -887,10 +887,6 @@ private struct SettingsPage: View {
     private var general: some View {
         Card(padding: 0) {
             VStack(spacing: 0) {
-                toggleRow("Reduce background noise",
-                          "macOS voice processing: removes room noise and anything playing from your speakers.",
-                          isOn: $controller.noiseReduction)
-                Rectangle().fill(Theme.hairline).frame(height: 1)
                 toggleRow("Show words as you speak", "Live captions in the pill while you hold the key.",
                           isOn: $controller.livePreview)
                 Rectangle().fill(Theme.hairline).frame(height: 1)

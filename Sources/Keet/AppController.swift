@@ -49,8 +49,10 @@ final class AppController: ObservableObject {
     @Published private(set) var micTestPeakDb: Float = -120
     @Published private(set) var micTestNoiseDb: Float = -120
     /// macOS voice processing: noise suppression and echo cancellation on the input.
-    /// On a desk microphone it cut the room noise by 17 dB.
-    @Published var noiseReduction: Bool = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? true {
+    /// On a desk microphone it cut the room noise by 17 dB in a one-off recording, but in
+    /// the app's start/stop cycle the voice-processing unit failed (CoreAudio -10877) and
+    /// capture stalled. Off, and not offered in Settings, until that's solved.
+    @Published var noiseReduction: Bool = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? false {
         didSet {
             UserDefaults.standard.set(noiseReduction, forKey: "noiseReduction")
             if isTestingMic { stopMicTest() }
@@ -62,7 +64,7 @@ final class AppController: ObservableObject {
         }
     }
     /// Show words in the pill while you talk.
-    @Published var livePreview: Bool = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true {
+    @Published var livePreview: Bool = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? false {
         didSet { UserDefaults.standard.set(livePreview, forKey: "livePreview") }
     }
 
@@ -121,7 +123,7 @@ final class AppController: ObservableObject {
         hotkey = HotkeyMonitor(choice: saved)
         selectedMicUID = UserDefaults.standard.string(forKey: "micUID")
         recorder.preferredDeviceUID = selectedMicUID
-        recorder.voiceProcessing = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? true
+        recorder.voiceProcessing = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? false
 
         hotkey.onPress = { [weak self] in self?.keyPressed() }
         hotkey.onRelease = { [weak self] in self?.keyReleased() }

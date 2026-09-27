@@ -227,8 +227,9 @@ While the key is down, Keet re-transcribes the most recent 14 seconds of audio a
 three times a second and shows the result in the pill, which grows from a waveform into
 a caption. It hugs short phrases, wraps to two lines, and drops the oldest words off
 the front. The text you get when you let go still comes from one full pass over the
-whole recording, so the preview never affects accuracy. It can be turned off in
-Settings.
+whole recording, so the preview doesn't change the final text. It's off by default:
+the first user found watching words appear distracting and felt it made results worse.
+Turn it on in Settings.
 
 ### Choosing a microphone
 
@@ -260,12 +261,14 @@ microphone's own input volume doesn't reliably help either: on one USB microphon
 going from 37% to 100% raised the room noise from −54 to about −47 dB while the voice
 rose less, and the gap shrank from 18 to about 15 dB.
 
-**Reduce background noise** (on by default) turns on macOS voice processing for the
-input (`AVAudioInputNode.setVoiceProcessingEnabled`): noise suppression, automatic gain,
-and echo cancellation, which also removes Keet's own chime and anything else playing
-from the speakers. Ducking of other apps' audio is set to the minimum. On that same
-microphone it lowered the room noise from −43 to −60 dB, and it started capturing just
-as quickly. The first real
+macOS voice processing (`AVAudioInputNode.setVoiceProcessingEnabled`: noise
+suppression, automatic gain, echo cancellation) looked like the fix: in a one-off
+3-second recording on that microphone it lowered the room noise from −43 to −60 dB.
+But inside the app, where the engine is prepared, started and stopped for every
+dictation, the voice-processing unit failed (CoreAudio error −10877) and capture
+stalled, so the app stopped listening. The code path is still there
+(`AudioRecorder.voiceProcessing`, `KEET_PROBE_UID` in the mic probe), off, and not
+offered in Settings until it works across the full start/stop cycle. The first real
 user's dictations peaked at a median of −36 dB on a USB microphone set to 37% input
 volume, right where errors climb. So Settings has an input volume slider for the
 microphone in use (CoreAudio `kAudioDevicePropertyVolumeScalar`, input scope), a test
