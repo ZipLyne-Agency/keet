@@ -1,0 +1,20 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Unit tests
+        run: swift test
+      - name: Build the app (ad hoc signed)
+        run: KEET_SIGN_IDENTITY=- scripts/build-app.sh
