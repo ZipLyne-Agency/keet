@@ -8,6 +8,7 @@ import KeetCore
 // keet-bench tail <dir> [noise dB] [gain dB] release 40 ms before the last word ends, with room
 //                                           noise mixed in, and see where the tail stops
 // keet-bench noise <dir> [noise dB] [peak dB...]  word error rate by speech level over room noise
+// keet-bench vocab <dir> <words.txt>        transcripts without and with a dictionary
 // keet-bench mic <seconds>                  microphone start latency, then transcribe
 
 func now() -> Double { CFAbsoluteTimeGetCurrent() }
@@ -171,6 +172,39 @@ case "noise":
         }
         print(String(format: "speech peak %4.0f dB over %3.0f dB noise (%2.0f dB apart): %4.1f%% word errors as recorded, %4.1f%% boosted",
                      peak, noiseDb, peak - noiseDb, 100 * Double(errorsRaw) / Double(total), 100 * Double(errorsBoosted) / Double(total)))
+    }
+
+case "vocab":
+    // Transcribes clips without and then with a dictionary. The dictionary file has one
+    // word per line, optionally followed by "|" and comma-separated things it's heard as.
+    let dir = URL(fileURLWithPath: args[1])
+    let words = try String(contentsOfFile: args[2], encoding: .utf8)
+        .split(separator: "\n").map(String.init).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .map { line -> Transcriber.VocabularyWord in
+            let parts = line.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            let heard = parts.count > 1 ? parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } : []
+            return Transcriber.VocabularyWord(text: parts[0], heardAs: heard)
+        }
+    let wavs = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        .filter { $0.pathExtension == "wav" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    var plain: [String] = [], plainMs: [Double] = []
+    for wav in wavs {
+        let t = now()
+        plain.append(try await transcriber.transcribe(try transcriber.loadAudioFile(wav)))
+        plainMs.append(now() - t)
+    }
+    let t0 = now()
+    try await transcriber.setVocabulary(words)
+    print("dictionary of \(words.count) words loaded in \(ms(now() - t0))")
+    _ = try await transcriber.transcribe(try transcriber.loadAudioFile(wavs[0]))  // warm the word spotter
+    for (i, wav) in wavs.enumerated() {
+        let t = now()
+        let boosted = try await transcriber.transcribe(try transcriber.loadAudioFile(wav))
+        let elapsed = now() - t
+        let expected = (try? String(contentsOf: wav.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8)) ?? ""
+        print("\n\(wav.lastPathComponent)  said:    \(expected.trimmingCharacters(in: .whitespacesAndNewlines))")
+        print("  without dictionary (\(ms(plainMs[i]))): \(plain[i])")
+        print("  with dictionary    (\(ms(elapsed))): \(boosted)")
     }
 
 case "mic":

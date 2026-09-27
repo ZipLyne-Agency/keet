@@ -255,13 +255,64 @@ clips at different levels over −54 dB of room noise and scores the transcripts
 | −42 dB | 30% | 23% |
 
 Raising the volume in software after recording doesn't help, because it raises the room
-noise with it; what matters is how far the voice sits above the room. The first real
+noise with it; what matters is how far the voice sits above the room. Raising the
+microphone's own input volume doesn't reliably help either: on one USB microphone,
+going from 37% to 100% raised the room noise from −54 to about −47 dB while the voice
+rose less, and the gap shrank from 18 to about 15 dB.
+
+**Reduce background noise** (on by default) turns on macOS voice processing for the
+input (`AVAudioInputNode.setVoiceProcessingEnabled`): noise suppression, automatic gain,
+and echo cancellation, which also removes Keet's own chime and anything else playing
+from the speakers. Ducking of other apps' audio is set to the minimum. On that same
+microphone it lowered the room noise from −43 to −60 dB, and it started capturing just
+as quickly. The first real
 user's dictations peaked at a median of −36 dB on a USB microphone set to 37% input
 volume, right where errors climb. So Settings has an input volume slider for the
 microphone in use (CoreAudio `kAudioDevicePropertyVolumeScalar`, input scope), a test
 meter that shows the peak in dB, and a note when recent dictations have been quiet. Each
 dictation's peak level is stored in History for that note. Aim for peaks between −20 and
 −10 dB.
+
+### The Dictionary
+
+No speech model knows your company's name or your clients'. The Dictionary fixes that
+with FluidAudio's CTC word spotting (NVIDIA NeMo's method, arXiv:2406.07096). A second,
+small model, Parakeet CTC 110M ([`FluidInference/parakeet-ctc-110m-coreml`](https://huggingface.co/FluidInference/parakeet-ctc-110m-coreml),
+revision `accdafd8cf8a2ff1cabe3c11e54416b405d409aa`, about 102 MB, CC-BY-4.0), runs over the
+same audio and scores how strongly each dictionary word is present. A transcript word is
+replaced by a dictionary word only when the two look alike and the audio supports the
+dictionary word better, so ordinary words aren't rewritten.
+
+Each word has the spelling you want and, optionally, what the model tends to hear
+instead ("ZipLyne", heard as "zip line"). Words need at least 3 letters. They're kept in
+`~/Library/Application Support/Keet/dictionary.json`. The word-spotting model is
+downloaded the first time you add a word (`scripts/fetch-model.sh --dictionary` fetches
+it ahead of time) into `~/Library/Application Support/FluidAudio/Models/parakeet-ctc-110m-coreml`.
+FluidAudio has no call to switch word spotting off, so emptying the dictionary reloads
+the main model without it, which takes about a tenth of a second.
+
+Measured on eight spoken sentences full of one person's product names, with a seven-word
+dictionary:
+
+| | Without the Dictionary | With it |
+|---|---|---|
+| "ZipLyne" | "zip lony" | ZipLyne |
+| "HotLyne" | "hotline" | HotLyne |
+| "MentionWell" | "Mention Well" | MentionWell |
+| "WitzLyne" | "width line" | WitzLyne |
+| "Keet" | "Keat" | Keet |
+
+With FluidAudio's default similarity bar (about 0.5), two ordinary words were wrongly
+replaced: "headline" became "HotLyne" through the alias "hotline", and a misheard
+"HotLyne" became "ZipLyne". Requiring 0.7 similarity per word kept all five fixes and
+removed both mistakes; 0.8 started losing real fixes. The same dictionary run over twelve
+ordinary sentences changed nothing. It adds about 100 ms per dictation (the word spotter
+runs over the audio), and loading it takes about 12 s the very first time (Core ML
+compiling for the Neural Engine) and about 0.15 s after that.
+
+`keet-bench vocab <clips> <words.txt>` transcribes clips without and then with a
+dictionary, one word per line, optionally followed by `|` and comma-separated
+"heard as" spellings. `KEET_VOCAB_MINSIM` overrides the similarity bar.
 
 ### Knowing it's listening
 
@@ -399,7 +450,7 @@ affect normal use:
 | `KEET_DEMO_CARD=<text>` | Show the Copy card at launch |
 | `KEET_TEST_SCREEN=<n>` | Put the overlay on screen `n` |
 | `KEET_SNAPSHOT=<dir>` | Render the window and the pill with sample data to PNGs and quit |
-| `KEET_MIC_PROBE=<file>` | Record 3 seconds from every input device and write what the engine did |
+| `KEET_MIC_PROBE=<file>` | Record 3 seconds from every input device and write what the engine did (`KEET_PROBE_UID=<uid>` records one device with voice processing off, then on) |
 
 `keet-bench noise <clips> [noise dB] [peak dB...]` gives word error rates by speech level.
 
@@ -422,6 +473,8 @@ typing: the pasted text lands in whatever app has focus.
 | `Sources/Keet/Overlay.swift` | The pill and the Copy card |
 | `Sources/Keet/MainWindow.swift` | The history and settings window |
 | `Sources/Keet/HistoryStore.swift` | Saved dictations |
+| `Sources/Keet/DictionaryStore.swift` | Your dictionary words |
+| `Sources/Keet/StartSound.swift` | The start chime |
 | `Sources/Keet/StatusMenu.swift` | The menu bar item |
 | `Sources/keet-bench/` | Benchmarks and experiments |
 | `Tests/KeetCoreTests/` | Tests for the tail rule |

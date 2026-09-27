@@ -19,7 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if let dir = ProcessInfo.processInfo.environment["KEET_SNAPSHOT"] {
-            let demo = AppController(history: HistoryStore(sample: Snapshot.sampleHistory()))
+            let demo = AppController(
+                history: HistoryStore(sample: Snapshot.sampleHistory()),
+                dictionary: DictionaryStore(sample: [
+                    DictionaryWord(text: "ZipLyne", heardAs: ["zip line", "zipline"]),
+                    DictionaryWord(text: "Parakeet"),
+                    DictionaryWord(text: "Kubernetes", heardAs: ["cooper netties"]),
+                ]))
             Snapshot.render(to: URL(fileURLWithPath: dir), controller: demo)
             return
         }
@@ -156,11 +162,18 @@ enum MicProbe {
             var text: String { lock.lock(); defer { lock.unlock() }; return items.joined(separator: "\n") }
         }
         let lines = Lines()
-        let devices: [(String, String?)] = [("Automatic", nil)] + AudioDevices.inputs().map { ($0.name, $0.uid) }
+        // KEET_PROBE_UID limits the run to one device, recorded with voice processing off then on.
+        let only = ProcessInfo.processInfo.environment["KEET_PROBE_UID"]
+        let base: [(String, String?)] = [("Automatic", nil)] + AudioDevices.inputs().map { ($0.name, $0.uid) }
+        let devices: [(String, String?, Bool)] = only.map { uid in
+            let name = AudioDevices.device(uid: uid)?.name ?? uid
+            return [(name, uid, false), (name, uid, true)]
+        } ?? base.map { ($0.0, $0.1, false) }
         DispatchQueue.global().async {
-            for (name, uid) in devices {
+            for (name, uid, processing) in devices {
                 let recorder = AudioRecorder()
                 recorder.preferredDeviceUID = uid
+                recorder.voiceProcessing = processing
                 let t0 = CFAbsoluteTimeGetCurrent()
                 func ms() -> Int { Int((CFAbsoluteTimeGetCurrent() - t0) * 1000) }
                 let observer = NotificationCenter.default.addObserver(
@@ -169,7 +182,7 @@ enum MicProbe {
                 recorder.onInterruption = { lines.append("  \(ms()) ms: interruption callback") }
                 do {
                     try recorder.prepare()
-                    lines.append("\(name): built on \(recorder.activeDeviceName ?? "?") at \(Int(recorder.sampleRate)) Hz")
+                    lines.append("\(name)\(processing ? " with voice processing" : ""): built on \(recorder.activeDeviceName ?? "?") at \(Int(recorder.sampleRate)) Hz")
                     try recorder.start()
                 } catch {
                     lines.append("\(name): failed: \(error.localizedDescription)")
@@ -181,7 +194,9 @@ enum MicProbe {
                     lines.append("  \(step * 200) ms: running \(recorder.engineIsRunning), samples \(recorder.capturedCount)")
                 }
                 let samples = recorder.stop()
-                lines.append("  stopped with \(samples.count) samples (\(String(format: "%.2f", Double(samples.count) / recorder.sampleRate)) s)")
+                var tracker = EnergyTracker(sampleRate: recorder.sampleRate)
+                tracker.consume(Array(samples.dropFirst(Int(recorder.sampleRate))))  // skip the first second
+                lines.append("  stopped with \(samples.count) samples (\(String(format: "%.2f", Double(samples.count) / recorder.sampleRate)) s), room noise \(Int(tracker.noiseFloorDb)) dB, loudest \(Int(tracker.peakDb)) dB")
                 NotificationCenter.default.removeObserver(observer)
             }
             try? lines.text.write(to: output, atomically: true, encoding: .utf8)

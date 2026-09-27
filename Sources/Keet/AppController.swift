@@ -21,7 +21,17 @@ final class AppController: ObservableObject {
 
     enum Phase: Equatable { case idle, listening, transcribing }
 
+    enum DictionaryState: Equatable {
+        case empty
+        /// Loading, or downloading the word-spotting model the first time.
+        case preparing(firstTime: Bool)
+        case active(words: Int)
+        case failed(String)
+    }
+
     @Published private(set) var modelState: ModelState = .loading
+    @Published private(set) var dictionaryState: DictionaryState = .empty
+    private var dictionaryTask: Task<Void, Never>?
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var hotkeyChoice: HotkeyChoice
     @Published private(set) var inputDevices: [InputDevice] = []
@@ -37,12 +47,27 @@ final class AppController: ObservableObject {
         didSet { UserDefaults.standard.set(startSoundOn, forKey: "startSound") }
     }
     @Published private(set) var micTestPeakDb: Float = -120
+    @Published private(set) var micTestNoiseDb: Float = -120
+    /// macOS voice processing: noise suppression and echo cancellation on the input.
+    /// On a desk microphone it cut the room noise by 17 dB.
+    @Published var noiseReduction: Bool = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(noiseReduction, forKey: "noiseReduction")
+            if isTestingMic { stopMicTest() }
+            let on = noiseReduction
+            audioQueue.async { [recorder] in
+                recorder.voiceProcessing = on
+                if !recorder.isRunning { try? recorder.prepare() }
+            }
+        }
+    }
     /// Show words in the pill while you talk.
     @Published var livePreview: Bool = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true {
         didSet { UserDefaults.standard.set(livePreview, forKey: "livePreview") }
     }
 
     let history: HistoryStore
+    let dictionary: DictionaryStore
     let overlay = OverlayController()
     private let startSound = StartSound()
     let hotkey: HotkeyMonitor
@@ -86,8 +111,9 @@ final class AppController: ObservableObject {
 
     private static var testing: Bool { ProcessInfo.processInfo.environment["KEET_TEST_AUDIO"] != nil }
 
-    init(history: HistoryStore? = nil) {
+    init(history: HistoryStore? = nil, dictionary: DictionaryStore? = nil) {
         self.history = history ?? HistoryStore()
+        self.dictionary = dictionary ?? DictionaryStore()
         let testFile = ProcessInfo.processInfo.environment["KEET_TEST_AUDIO"].map { URL(fileURLWithPath: $0) }
         recorder = AudioRecorder(testAudioFile: testFile)
         let saved = HotkeyChoice(rawValue: UserDefaults.standard.integer(forKey: "hotkey")) ?? .leftOption
@@ -95,6 +121,7 @@ final class AppController: ObservableObject {
         hotkey = HotkeyMonitor(choice: saved)
         selectedMicUID = UserDefaults.standard.string(forKey: "micUID")
         recorder.preferredDeviceUID = selectedMicUID
+        recorder.voiceProcessing = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? true
 
         hotkey.onPress = { [weak self] in self?.keyPressed() }
         hotkey.onRelease = { [weak self] in self?.keyReleased() }
@@ -109,6 +136,7 @@ final class AppController: ObservableObject {
             DispatchQueue.main.async { self?.keyReleased() }
         }
 
+        self.dictionary.onChange = { [weak self] in self?.applyDictionary() }
         refreshDevices()
         deviceWatcher = AudioDeviceWatcher { [weak self] in
             MainActor.assumeIsolated { self?.devicesChanged() }
@@ -138,9 +166,39 @@ final class AppController: ObservableObject {
             let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             log.notice("model ready in \(ms) ms")
             modelState = .ready(loadMs: ms)
+            applyDictionary()
         } catch {
             log.error("model load failed: \(error.localizedDescription, privacy: .public)")
             modelState = .failed(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Dictionary
+
+    /// Hands the current word list to the model. Called at launch and on every change;
+    /// a newer call replaces one still in progress.
+    func applyDictionary() {
+        guard modelState.isReady else { return }
+        let words = dictionary.words.map { Transcriber.VocabularyWord(text: $0.text, heardAs: $0.heardAs) }
+        dictionaryTask?.cancel()
+        if words.isEmpty {
+            dictionaryState = .empty
+        } else {
+            dictionaryState = .preparing(firstTime: !Transcriber.dictionaryModelIsPresent)
+        }
+        dictionaryTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let t0 = CFAbsoluteTimeGetCurrent()
+                try await self.transcriber.setVocabulary(words)
+                guard !Task.isCancelled else { return }
+                if !words.isEmpty { try await self.transcriber.warmUp() }
+                log.notice("dictionary of \(words.count) words ready in \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms")
+                self.dictionaryState = words.isEmpty ? .empty : .active(words: words.count)
+            } catch {
+                log.error("dictionary failed: \(error.localizedDescription, privacy: .public)")
+                self.dictionaryState = .failed(error.localizedDescription)
+            }
         }
     }
 
@@ -176,10 +234,13 @@ final class AppController: ObservableObject {
         if let device = activeMic { AudioDevices.setInputVolume(device.id, volume) }
     }
 
-    /// Median peak level of recent dictations, in dBFS.
-    var recentPeakDb: Float? {
-        let peaks = history.entries.prefix(20).compactMap(\.peakDb).sorted()
-        return peaks.count >= 3 ? peaks[peaks.count / 2] : nil
+    /// Median of how far recent dictations sat above the room noise, in dB.
+    var recentSeparationDb: Float? {
+        let gaps = history.entries.prefix(20).compactMap { entry -> Float? in
+            guard let peak = entry.peakDb, let noise = entry.noiseDb else { return nil }
+            return peak - noise
+        }.sorted()
+        return gaps.count >= 3 ? gaps[gaps.count / 2] : nil
     }
 
     var activeMicName: String {
@@ -233,10 +294,12 @@ final class AppController: ObservableObject {
                 }
                 let level = tracker.meterLevel
                 let recentPeak = tracker.framesDb.suffix(30).max() ?? -120
+                let noise = tracker.noiseFloorDb
                 let done = CFAbsoluteTimeGetCurrent() - started > 10
                 DispatchQueue.main.async {
                     self?.micTestLevel = level
                     self?.micTestPeakDb = recentPeak
+                    self?.micTestNoiseDb = noise
                     if done { self?.stopMicTest() }
                 }
             }
@@ -250,6 +313,7 @@ final class AppController: ObservableObject {
         isTestingMic = false
         micTestLevel = 0
         micTestPeakDb = -120
+        micTestNoiseDb = -120
         audioQueue.async { [weak self, recorder] in
             self?.micTestTimer?.cancel()
             self?.micTestTimer = nil
@@ -434,14 +498,14 @@ final class AppController: ObservableObject {
         let startLatency = current.firstAudio.map { Int(($0 - current.pressed) * 1000) } ?? -1
         let t = current.tracker
         log.notice("session \(current.id): first audio after \(startLatency) ms, tail \(tailMs) ms, \(samples.count) samples, noise \(Int(t.noiseFloorDb)) dB, threshold \(Int(t.speechThresholdDb)) dB, peak \(Int(t.peakDb)) dB")
-        let peak = t.peakDb
+        let peak = t.peakDb, noise = t.noiseFloorDb
         DispatchQueue.main.async { [weak self] in
-            self?.transcribe(samples, rate: rate, released: released, peakDb: peak, session: current)
+            self?.transcribe(samples, rate: rate, released: released, peakDb: peak, noiseDb: noise, session: current)
         }
     }
 
     private func transcribe(
-        _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, session current: Session
+        _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, noiseDb: Float, session current: Session
     ) {
         let isLatest = session === current || session == nil
         if session === current { session = nil }
@@ -467,7 +531,7 @@ final class AppController: ObservableObject {
             let latencyMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
             let keepOnly = await self.keepOnly(current)
             self.deliver(text, ownsOverlay: isLatest, audioSeconds: Double(samples.count) / max(rate, 1),
-                         latencyMs: latencyMs, peakDb: peakDb, keepOnly: keepOnly)
+                         latencyMs: latencyMs, peakDb: peakDb, noiseDb: noiseDb, keepOnly: keepOnly)
             log.notice("session \(current.id): transcribe \(transcribeMs) ms, release to text \(latencyMs) ms")
         }
     }
@@ -479,7 +543,8 @@ final class AppController: ObservableObject {
     }
 
     private func deliver(
-        _ text: String, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float, keepOnly: Bool
+        _ text: String, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float, noiseDb: Float,
+        keepOnly: Bool
     ) {
         // A newer dictation may already be showing its pill; leave that alone.
         let ownsOverlay = ownsOverlay && session == nil
@@ -493,7 +558,7 @@ final class AppController: ObservableObject {
             let app = NSWorkspace.shared.frontmostApplication
             history.add(Dictation(
                 date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
-                audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb))
+                audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb, noiseDb: noiseDb))
             return
         }
         let target = inserter.currentTarget()
@@ -513,6 +578,6 @@ final class AppController: ObservableObject {
         }
         history.add(Dictation(
             date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
-            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb))
+            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb, noiseDb: noiseDb))
     }
 }

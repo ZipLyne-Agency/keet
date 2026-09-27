@@ -24,6 +24,8 @@ struct Dictation: Codable, Identifiable, Equatable {
     var delivery: Delivery
     /// Loudest 10 ms of the recording, in dBFS. Older entries don't have it.
     var peakDb: Float?
+    /// Room noise estimated for the recording, in dBFS.
+    var noiseDb: Float?
 
     var words: Int { text.split(whereSeparator: \.isWhitespace).count }
 }

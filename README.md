@@ -18,7 +18,9 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
 - **No text field? No lost words.** If nothing can take text, a card shows what you said with a Copy button.
 - **Everything you've said, in one place.** The Keet window keeps your history with search,
   copy, paste-into-the-last-app, and export.
-- **Your choice of microphone**, with a live level test.
+- **A dictionary for your words.** Names, companies and jargon get spelled your way
+  (ZipLyne, not "zip line").
+- **Your choice of microphone**, with an input volume slider and a live level test.
 
 ## Requirements
 
@@ -34,6 +36,7 @@ Built and measured on a MacBook Pro with M5 Max running macOS 27 and Xcode 27.
 git clone https://github.com/ZipLyne-Agency/keet.git
 cd keet
 scripts/fetch-model.sh           # optional: Keet also downloads the model on first launch
+                                 # add --dictionary to fetch the Dictionary's model too
 scripts/build-app.sh --install   # builds, signs, copies to /Applications
 open /Applications/Keet.app
 ```

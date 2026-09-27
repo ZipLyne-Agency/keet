@@ -20,10 +20,70 @@ public final class Transcriber: @unchecked Sendable {
         ModelNames.ParakeetUnified.vocab,
     ]
 
-    private let manager = UnifiedAsrManager()
     private let converter = AudioConverter()
+    private let lock = NSLock()
+    private var _manager = UnifiedAsrManager()
+    private var ctcModels: CtcModels?
+    private var vocabularyActive = false
+
+    /// Swapped out when the dictionary is cleared (FluidAudio can't switch boosting off).
+    private var manager: UnifiedAsrManager {
+        get { lock.lock(); defer { lock.unlock() }; return _manager }
+        set { lock.lock(); _manager = newValue; lock.unlock() }
+    }
 
     public init() {}
+
+    /// A word the model should prefer, with what it tends to hear instead.
+    public struct VocabularyWord: Sendable, Equatable {
+        public let text: String
+        public let heardAs: [String]
+
+        public init(text: String, heardAs: [String] = []) {
+            self.text = text
+            self.heardAs = heardAs
+        }
+    }
+
+    /// How alike a heard word must be to a dictionary word (or one of its "heard as"
+    /// spellings) before it can be replaced. FluidAudio's default (about 0.5) let
+    /// "headline" become "HotLyne" through the alias "hotline"; 0.7 kept every real fix
+    /// in testing and removed both false ones. KEET_VOCAB_MINSIM overrides it.
+    static let termMinSimilarity: Float = 0.7
+
+    /// Whether the word-spotting model the Dictionary needs is on disk.
+    public static var dictionaryModelIsPresent: Bool {
+        CtcModels.modelsExist(at: CtcModels.defaultCacheDirectory())
+    }
+
+    /// Makes the model prefer these words. The first call loads (or downloads, about
+    /// 100 MB) Parakeet CTC 110M, which spots the words in the audio; a transcript word
+    /// is replaced only when the audio supports the dictionary word better.
+    public func setVocabulary(_ words: [VocabularyWord]) async throws {
+        if words.isEmpty {
+            guard vocabularyActive else { return }
+            let fresh = UnifiedAsrManager()
+            try await fresh.loadModels(from: Self.modelDirectory)
+            manager = fresh
+            vocabularyActive = false
+            return
+        }
+        if ctcModels == nil {
+            let directory = CtcModels.defaultCacheDirectory()
+            ctcModels = CtcModels.modelsExist(at: directory)
+                ? try await CtcModels.load(from: directory)
+                : try await CtcModels.downloadAndLoad()
+        }
+        guard let ctcModels else { return }
+        let minSimilarity = ProcessInfo.processInfo.environment["KEET_VOCAB_MINSIM"].flatMap(Float.init)
+            ?? Self.termMinSimilarity
+        let context = CustomVocabularyContext(terms: words.map {
+            CustomVocabularyTerm(
+                text: $0.text, aliases: $0.heardAs.isEmpty ? nil : $0.heardAs, minSimilarity: minSimilarity)
+        })
+        try await manager.configureVocabularyBoosting(vocabulary: context, ctcModels: ctcModels)
+        vocabularyActive = true
+    }
 
     public static var modelIsPresent: Bool {
         requiredFiles.allSatisfy {

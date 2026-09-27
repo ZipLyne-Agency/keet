@@ -71,6 +71,12 @@ public final class AudioRecorder: @unchecked Sendable {
     /// Name of the device the engine is actually built on.
     public private(set) var activeDeviceName: String?
 
+    /// macOS voice processing on the input: noise suppression, automatic gain, and echo
+    /// cancellation (so sound from the Mac's own speakers is removed from the recording).
+    public var voiceProcessing = false {
+        didSet { if voiceProcessing != oldValue { needsRebuild = true } }
+    }
+
     private var engine: AVAudioEngine?
     private var store: SampleStore?
     private var needsRebuild = true
@@ -111,6 +117,12 @@ public final class AudioRecorder: @unchecked Sendable {
                 &id, UInt32(MemoryLayout<AudioDeviceID>.size))
         }
         activeDeviceName = (chosen ?? AudioDevices.defaultInput())?.name
+        if voiceProcessing {
+            try input.setVoiceProcessingEnabled(true)
+            // Keep other apps' audio at full volume while dictating.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputDevice }
 

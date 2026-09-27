@@ -59,7 +59,7 @@ private struct IconButton: View {
 // MARK: - Root
 
 struct MainView: View {
-    enum Tab: String, CaseIterable { case history = "History", settings = "Settings" }
+    enum Tab: String, CaseIterable { case history = "History", dictionary = "Dictionary", settings = "Settings" }
 
     @ObservedObject var controller: AppController
     @ObservedObject var history: HistoryStore
@@ -78,6 +78,7 @@ struct MainView: View {
             Group {
                 switch tab {
                 case .history: HistoryPage(controller: controller, history: history)
+                case .dictionary: DictionaryPage(controller: controller, dictionary: controller.dictionary)
                 case .settings: SettingsPage(controller: controller, history: history)
                 }
             }
@@ -108,6 +109,16 @@ struct MainView: View {
     }
 }
 
+extension MainView.Tab {
+    var symbol: String {
+        switch self {
+        case .history: "clock.arrow.circlepath"
+        case .dictionary: "character.book.closed"
+        case .settings: "gearshape"
+        }
+    }
+}
+
 private struct TabSwitcher: View {
     @Binding var tab: MainView.Tab
 
@@ -118,7 +129,7 @@ private struct TabSwitcher: View {
                     withAnimation(.snappy(duration: 0.2)) { tab = item }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: item == .history ? "clock.arrow.circlepath" : "gearshape")
+                        Image(systemName: item.symbol)
                             .font(.system(size: 11, weight: .semibold))
                         Text(item.rawValue).font(.system(size: 12, weight: .semibold))
                     }
@@ -505,6 +516,149 @@ private struct EmptyHistory: View {
     }
 }
 
+// MARK: - Dictionary
+
+private struct DictionaryPage: View {
+    @ObservedObject var controller: AppController
+    @ObservedObject var dictionary: DictionaryStore
+    @State private var word = ""
+    @State private var heardAs = ""
+    @State private var problem: String?
+    @FocusState private var wordFocused: Bool
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Dictionary").font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.text)
+                    Text("Names, companies and jargon Keet should spell your way. Add the word as you want it written. If you know what Keet usually hears instead, add that too; it helps with unusual spellings.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                addCard
+                status
+                if !dictionary.words.isEmpty {
+                    LazyVStack(spacing: 8) {
+                        ForEach(dictionary.words) { entry in
+                            WordRow(entry: entry) { dictionary.remove(entry.id) }
+                        }
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 680)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var addCard: some View {
+        Card(padding: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    field("Word or name, e.g. ZipLyne", text: $word)
+                        .focused($wordFocused)
+                    field("Usually heard as (optional), e.g. zip line", text: $heardAs)
+                    Button(action: add) {
+                        Text("Add")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .frame(width: 58, height: 32)
+                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.text))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(word.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                }
+                if let problem {
+                    Text(problem).font(.system(size: 11)).foregroundStyle(Theme.warning)
+                } else {
+                    Text("Separate several \u{201C}heard as\u{201D} spellings with commas.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.tertiary)
+                }
+            }
+        }
+    }
+
+    private func field(_ placeholder: String, text: Binding<String>) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.hairline))
+            .onSubmit(add)
+    }
+
+    private func add() {
+        let text = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        // The word spotter ignores very short terms; they collide with ordinary words.
+        guard text.count >= 3 else {
+            problem = "Words need at least 3 letters."
+            return
+        }
+        problem = nil
+        dictionary.add(text, heardAs: heardAs.split(separator: ",").map(String.init))
+        word = ""
+        heardAs = ""
+        wordFocused = true
+    }
+
+    @ViewBuilder private var status: some View {
+        let (color, text): (Color, String) = {
+            switch controller.dictionaryState {
+            case .empty:
+                return (Theme.tertiary, "Add your first word. The first time, Keet downloads a small word-spotting model (about 100 MB) that listens for your words.")
+            case .preparing(let firstTime):
+                return (Theme.warning, firstTime
+                    ? "Downloading the word-spotting model (about 100 MB). Your words work as soon as it's done."
+                    : "Updating…")
+            case .active(let count):
+                return (Theme.accent, "On: Keet is listening for \(count) word\(count == 1 ? "" : "s").")
+            case .failed(let reason):
+                return (Theme.danger, "Couldn't turn the dictionary on: \(reason)")
+            }
+        }()
+        HStack(alignment: .top, spacing: 8) {
+            Circle().fill(color).frame(width: 7, height: 7).padding(.top, 5)
+            Text(text).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct WordRow: View {
+    let entry: DictionaryWord
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.text).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text)
+                if !entry.heardAs.isEmpty {
+                    Text("heard as " + entry.heardAs.map { "\u{201C}\($0)\u{201D}" }.joined(separator: ", "))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.tertiary)
+                }
+            }
+            Spacer()
+            IconButton(symbol: "trash", help: "Remove", action: onDelete)
+                .opacity(hovering ? 1 : 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(hovering ? Theme.surfaceRaised : Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
+        .onHover { hovering = $0 }
+    }
+}
+
 // MARK: - Settings
 
 private struct SettingsPage: View {
@@ -622,8 +776,9 @@ private struct SettingsPage: View {
                     Group {
                         if controller.isTestingMic {
                             if controller.micTestPeakDb > -100 {
-                                Text("Peak \(Self.decibels(controller.micTestPeakDb))")
-                                    .foregroundStyle(levelColor(controller.micTestPeakDb))
+                                let gap = controller.micTestPeakDb - controller.micTestNoiseDb
+                                Text("Voice \(Int(gap.rounded())) dB over room")
+                                    .foregroundStyle(separationColor(gap))
                             } else {
                                 Text("Speak now").foregroundStyle(Theme.secondary)
                             }
@@ -647,22 +802,22 @@ private struct SettingsPage: View {
     /// Guidance under the microphone card: how loud you've been, and what to aim for.
     @ViewBuilder private var micNotes: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let peak = controller.recentPeakDb, peak < -28 {
+            if let gap = controller.recentSeparationDb, gap < 25 {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.warning)
-                    Text("Your voice has been reaching Keet at about \(Self.decibels(peak)). Aim for −20 to −10 dB while you talk: move closer to the microphone or raise the input volume. Quiet audio is the most common cause of wrong words; at −36 dB about one word in ten comes out wrong, against almost none at −12 dB.")
+                    Text("Your voice has been only about \(Int(gap.rounded())) dB above the room noise. That gap decides accuracy: at 18 dB about one word in ten comes out wrong, at 30 dB or more almost none. Get closer to the microphone and keep Reduce background noise on. Raising the input volume doesn't help; it lifts the noise too.")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            } else if let peak = controller.recentPeakDb {
-                Text("Your recent dictations peaked around \(Self.decibels(peak)), a good level.")
+            } else if let gap = controller.recentSeparationDb {
+                Text("Your recent dictations were about \(Int(gap.rounded())) dB above the room noise, a good gap.")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.tertiary)
             }
-            Text("Press Test and talk normally: aim for a peak between −20 and −10 dB. Bluetooth headsets drop to call quality while their microphone is on; the Mac's own microphone avoids that.")
+            Text("Press Test and talk normally: aim for your voice 30 dB or more over the room. Bluetooth headsets drop to call quality while their microphone is on; the Mac's own microphone avoids that.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -674,10 +829,10 @@ private struct SettingsPage: View {
         "\(Int(value.rounded()))".replacingOccurrences(of: "-", with: "\u{2212}") + " dB"
     }
 
-    private func levelColor(_ db: Float) -> Color {
-        if db > -4 { return Theme.danger }
-        if db >= -24 { return Theme.accent }
-        return Theme.warning
+    private func separationColor(_ gap: Float) -> Color {
+        if gap >= 30 { return Theme.accent }
+        if gap >= 20 { return Theme.warning }
+        return Theme.danger
     }
 
     private func micRow(uid: String?, name: String, detail: String, symbol: String) -> some View {
@@ -732,6 +887,10 @@ private struct SettingsPage: View {
     private var general: some View {
         Card(padding: 0) {
             VStack(spacing: 0) {
+                toggleRow("Reduce background noise",
+                          "macOS voice processing: removes room noise and anything playing from your speakers.",
+                          isOn: $controller.noiseReduction)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
                 toggleRow("Show words as you speak", "Live captions in the pill while you hold the key.",
                           isOn: $controller.livePreview)
                 Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -984,7 +1143,7 @@ enum Snapshot {
 
     static func render(to directory: URL, controller: AppController) {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let tabs: [(MainView.Tab, String)] = [(.history, "history"), (.settings, "settings")]
+        let tabs: [(MainView.Tab, String)] = [(.history, "history"), (.dictionary, "dictionary"), (.settings, "settings")]
         var windows: [NSWindow] = []
         for (tab, name) in tabs {
             let view = NSHostingView(rootView: MainView(controller: controller, history: controller.history, tab: tab))
