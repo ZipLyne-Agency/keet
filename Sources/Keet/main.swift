@@ -18,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MicProbe.run(output: URL(fileURLWithPath: out))
             return
         }
+        if let out = ProcessInfo.processInfo.environment["KEET_CLEANUP_PROBE"] {
+            CleanupProbe.run(output: URL(fileURLWithPath: out))
+            return
+        }
         if let dir = ProcessInfo.processInfo.environment["KEET_SNAPSHOT"] {
             let demo = AppController(
                 history: HistoryStore(sample: Snapshot.sampleHistory()),
@@ -201,6 +205,28 @@ enum MicProbe {
             }
             try? lines.text.write(to: output, atomically: true, encoding: .utf8)
             DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+}
+
+/// Runs the AI cleanup inside the app, as a menu bar app with no window, over your
+/// recent dictations: Apple rate-limits the on-device model for background apps, and
+/// a command-line test can't show that. Writes timings and outcomes, never the text.
+enum CleanupProbe {
+    static func run(output: URL) {
+        Task.detached {
+            let cleanup = Cleanup()
+            var lines = ["availability: \(cleanup.availability)"]
+            let history = await MainActor.run { HistoryStore().entries.map(\.text) }
+                .filter { $0.split(separator: " ").count >= 4 }
+            for text in history.prefix(30) {
+                cleanup.prepare()
+                try? await Task.sleep(for: .milliseconds(300))
+                let result = await cleanup.clean(text)
+                lines.append("\(result.ms) ms  \(result.note)")
+            }
+            try? lines.joined(separator: "\n").write(to: output, atomically: true, encoding: .utf8)
+            exit(0)
         }
     }
 }

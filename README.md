@@ -20,6 +20,10 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
   copy, paste-into-the-last-app, and export.
 - **A dictionary for your words.** Names, companies and jargon get spelled your way
   (ZipLyne, not "zip line").
+- **AI cleanup, on the Mac.** Apple's on-device model drops "um", filler "like" and
+  repeated words. Strict rules keep only those edits, so it can't change what you meant.
+  It needs Apple Intelligence (macOS 26 or later) and adds about a third of a second.
+  See [how](docs/REMAKE.md#ai-cleanup).
 - **Your choice of microphone**, with an input volume slider and a live level test.
 
 ## Requirements
@@ -27,6 +31,7 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
 - A Mac with Apple Silicon (M1 or later) on macOS 15 Sequoia or later
 - Xcode 26 or later to build it
 - About 615 MB of disk for the speech model
+- For AI cleanup: macOS 26 or later with Apple Intelligence turned on (optional)
 
 Built and measured on a MacBook Pro with M5 Max running macOS 27 and Xcode 27.
 
@@ -65,7 +70,8 @@ each paste.
 
 ## Privacy
 
-Audio is never written to disk and never leaves the Mac. Transcripts are kept in
+Audio is never written to disk and never leaves the Mac. AI cleanup runs on Apple's
+on-device model, so text doesn't leave the Mac either. Transcripts are kept in
 `~/Library/Application Support/Keet/history.json` so you can find them later; turn off
 **Keep history on this Mac** in Settings to keep them only until Keet quits. Logs record
 timings and levels, never what you said.

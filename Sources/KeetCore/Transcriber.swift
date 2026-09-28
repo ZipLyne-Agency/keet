@@ -50,6 +50,16 @@ public final class Transcriber: @unchecked Sendable {
     /// "headline" become "HotLyne" through the alias "hotline"; 0.7 kept every real fix
     /// in testing and removed both false ones. KEET_VOCAB_MINSIM overrides it.
     static let termMinSimilarity: Float = 0.7
+    /// Short words are one letter away from common English: at 0.7, "Keet" replaced
+    /// every "keep" and "meet". Up to five letters, a heard word must match the
+    /// dictionary word or one of its "heard as" spellings exactly (0.85 rules out any
+    /// single-letter difference at that length).
+    static let shortTermMinSimilarity: Float = 0.85
+
+    static func minSimilarity(for term: String) -> Float {
+        if let override = ProcessInfo.processInfo.environment["KEET_VOCAB_MINSIM"].flatMap(Float.init) { return override }
+        return term.count <= 5 ? shortTermMinSimilarity : termMinSimilarity
+    }
 
     /// Whether the word-spotting model the Dictionary needs is on disk.
     public static var dictionaryModelIsPresent: Bool {
@@ -75,11 +85,10 @@ public final class Transcriber: @unchecked Sendable {
                 : try await CtcModels.downloadAndLoad()
         }
         guard let ctcModels else { return }
-        let minSimilarity = ProcessInfo.processInfo.environment["KEET_VOCAB_MINSIM"].flatMap(Float.init)
-            ?? Self.termMinSimilarity
         let context = CustomVocabularyContext(terms: words.map {
             CustomVocabularyTerm(
-                text: $0.text, aliases: $0.heardAs.isEmpty ? nil : $0.heardAs, minSimilarity: minSimilarity)
+                text: $0.text, aliases: $0.heardAs.isEmpty ? nil : $0.heardAs,
+                minSimilarity: Self.minSimilarity(for: $0.text))
         })
         try await manager.configureVocabularyBoosting(vocabulary: context, ctcModels: ctcModels)
         vocabularyActive = true

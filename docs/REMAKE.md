@@ -13,7 +13,7 @@ Five behaviors define it. Everything else serves these.
    left alone as a normal shortcut. After that it's a dictation, and nothing but letting
    go (or Escape) ends it.
 2. **Show that it's listening.** A pill at the bottom of the screen you're typing on,
-   with a live waveform and the words as you say them.
+   with a live waveform (and, if you turn it on, the words as you say them).
 3. **Put the text where the cursor is.** If nothing can take text, show it on a card with
    a Copy button instead of losing it.
 4. **Never drop the last word.** Letting go of the key a moment before the last word ends
@@ -33,6 +33,7 @@ Five behaviors define it. Everything else serves these.
 | Disk | | About 615 MB for the model, plus about 1 GB for the build folder |
 | Memory | Keet uses 58 MB at rest (75 MB peak, measured with `footprint`) | |
 | Network | Only to download the model once | |
+| AI cleanup (optional) | Apple Intelligence on, macOS 27 | macOS 26 with Apple Intelligence; skipped without it |
 | Apple developer certificate | Developer ID Application | Optional; without one the app is signed ad hoc |
 
 Intel Macs are not supported. The model runs on the Neural Engine, and nothing here has
@@ -125,6 +126,8 @@ one-time setup cost.
 4. **Key up.** The recorder keeps going. Every 10 ms the tail rule checks whether the
    speaker has finished (next section). Typing or clicking also ends it at once.
 5. **Transcribe.** The recording is resampled to 16 kHz mono and transcribed.
+   With AI cleanup on, Apple's on-device model then tidies the text (see
+   [AI cleanup](#ai-cleanup)); it was warmed up at key down.
 6. **Deliver.** Accessibility says whether a text field has focus. If it does, the text
    is pasted with Command-V through the clipboard, and the clipboard is restored half a
    second later. If not, the Copy card appears. Either way the dictation is added to
@@ -132,7 +135,7 @@ one-time setup cost.
 
 The code for each step: `HotkeyMonitor.swift` (1), `AudioRecorder.swift` (2),
 `AppController.swift` and `Overlay.swift` (3, 4), `SpeechTail.swift` (4),
-`Transcriber.swift` (5), `TextInserter.swift` (6).
+`Transcriber.swift` and `Cleanup.swift` (5), `TextInserter.swift` (6).
 
 ## The decisions that matter
 
@@ -309,13 +312,78 @@ With FluidAudio's default similarity bar (about 0.5), two ordinary words were wr
 replaced: "headline" became "HotLyne" through the alias "hotline", and a misheard
 "HotLyne" became "ZipLyne". Requiring 0.7 similarity per word kept all five fixes and
 removed both mistakes; 0.8 started losing real fixes. The same dictionary run over twelve
-ordinary sentences changed nothing. It adds about 100 ms per dictation (the word spotter
+ordinary sentences changed nothing.
+
+Short words need a stricter bar. At 0.7, a four-letter word one letter away from a
+dictionary word counts as a match (0.75), so with "Keet" in a real 101-word dictionary,
+every "keep" and "meet" became "Keet": four of 180 real dictations, and eight of eight
+test sentences built around those words. Words of five letters or fewer now need 0.85,
+which rules out any one-letter difference at that length: a heard word has to match the
+dictionary word or one of its "heard as" spellings exactly. That fixed all eight, and the
+five product-name fixes above still happen. It adds about 100 ms per dictation (the word spotter
 runs over the audio), and loading it takes about 12 s the very first time (Core ML
 compiling for the Neural Engine) and about 0.15 s after that.
 
 `keet-bench vocab <clips> <words.txt>` transcribes clips without and then with a
 dictionary, one word per line, optionally followed by `|` and comma-separated
 "heard as" spellings. `KEET_VOCAB_MINSIM` overrides the similarity bar.
+
+### AI cleanup
+
+Parakeet writes down what you said, including "um", filler "like", and the word you said
+twice. AI cleanup removes those with Apple's on-device language model (the Foundation
+Models framework, the model behind Apple Intelligence). It needs macOS 26 or later with
+Apple Intelligence turned on, downloads nothing (the model ships with macOS), and never
+leaves the Mac. Settings shows whether it can run; without it, Keet delivers the
+transcript as before.
+
+The model can't be trusted to only tidy. Run over 180 real dictations with careful
+instructions, it removed fillers well, but it also:
+
+- turned "I like the beginning music, not the ending" into "I like the beginning music,
+  the ending",
+- dropped whole clauses ("but you might have one already"),
+- added a word nobody said ("beginning and" became "beginning and end"),
+- and softened opinions ("I feel like the image is ugly" became "The image is ugly").
+
+So the model only proposes. `Cleanup.check` lines its output up with the transcript
+word by word (longest common subsequence) and keeps an edit only if it is one of these:
+
+| Kept | Example |
+|---|---|
+| Dropping a filler | um, uh, er, "you know", "I mean," |
+| Dropping filler "like" | not after I/you/we/don't/looks/feel/things..., not before a number ("like five minutes") |
+| Dropping a repeat | "the the", "does it does it" (not "really really" or "no no") |
+| Swapping one word for a near-sounding one | "max" to "Mac": one letter apart, two for longer words; never a negation, number, or dictionary word |
+| Fixing agreement | is/are, was/were, has/have, do/does, a/an |
+| Punctuation and capitals | periods and commas may be added or changed, never dropped |
+
+Any other edit is undone by putting the spoken words back, along with the punctuation
+the model changed next to it. Output that loses a question mark or a dictionary word is
+thrown away. The same 180 dictations then came out with only safe edits: 31 changed
+(filler "like" most of all, then stutters, "uh", "you know", and added periods), 130
+unchanged, 20 too short to bother. `Tests/KeetCoreTests/CleanupTests.swift` holds the
+real failures above as tests.
+
+Speed is the cost. The model writes about 60 words a second, runs one request at a time
+(four at once took as long as four in a row), and its first call takes about a second.
+Keet creates and prewarms a session when the key goes down, so by the time you let go
+the instructions are already processed. Measured on those 180 dictations (median 13
+words, longest 74): 350 ms median, 680 ms at the 90th percentile, 1.3 s at most. Inside
+the menu bar app it measured 264 ms median over 30, with no rate limiting. Dictations
+under four words skip it, dictations over 100 words skip it (they'd take about two
+seconds), and a call that runs past 0.7 s plus 22 ms a word is cancelled and the
+transcript delivered as is. Cancelling frees the model at once.
+
+It uses `SystemLanguageModel(guardrails: .permissiveContentTransformations)`, Apple's
+setting for rewriting text the user supplied; the default guardrails refuse ordinary
+dictation that mentions sensitive topics. History keeps what was heard next to the
+cleaned text ("HEARD" under a cleaned card), and the latency panel shows the AI time.
+FoundationModels is weak-linked (check with `otool -l`), so the app still launches on
+macOS 15.
+
+`keet-bench cleanup <history.json> [dictionary.json]` runs the cleanup over saved
+dictations and prints every change, every refusal, and the timings.
 
 ### Knowing it's listening
 
@@ -437,8 +505,13 @@ Per-dictation timings are in the system log:
 ```
 
 Each dictation logs when the first audio arrived, the tail length, room noise,
-threshold and peak levels, transcription time, and key release to text. Transcripts are
-never logged.
+threshold and peak levels, transcription time, cleanup time and outcome, and key release
+to text. Transcripts are never logged.
+
+```bash
+swift test                                   # tail rule and cleanup rule tests
+.build/release/keet-bench cleanup ~/Library/Application\ Support/Keet/history.json
+```
 
 ### Testing without talking
 
@@ -470,6 +543,7 @@ typing: the pasted text lands in whatever app has focus.
 | `Sources/KeetCore/AudioRecorder.swift` | Sink-node capture, device selection, test injection |
 | `Sources/KeetCore/AudioDevices.swift` | Listing input devices and watching for changes |
 | `Sources/KeetCore/SpeechTail.swift` | Loudness tracking, noise floor, threshold, the tail rule |
+| `Sources/KeetCore/Cleanup.swift` | AI cleanup and the rules that decide which edits are kept |
 | `Sources/Keet/AppController.swift` | One dictation from key press to delivered text |
 | `Sources/Keet/HotkeyMonitor.swift` | The event tap and bare-key rules |
 | `Sources/Keet/TextInserter.swift` | Focus detection, paste, clipboard restore |
@@ -480,7 +554,7 @@ typing: the pasted text lands in whatever app has focus.
 | `Sources/Keet/StartSound.swift` | The start chime |
 | `Sources/Keet/StatusMenu.swift` | The menu bar item |
 | `Sources/keet-bench/` | Benchmarks and experiments |
-| `Tests/KeetCoreTests/` | Tests for the tail rule |
+| `Tests/KeetCoreTests/` | Tests for the tail rule and the cleanup rules |
 | `scripts/` | Build, model download, icon, test clips, key driver |
 
 ## Troubleshooting
@@ -512,6 +586,9 @@ their microphone is in use. Pick the Mac's built-in or a USB microphone in Setti
 ## Known limits
 
 - English only.
+- AI cleanup needs Apple Intelligence and skips dictations over 100 words. It only
+  removes fillers and repeats and fixes near-sounding words; it won't restructure a
+  sentence or keep just the corrected half of "at five, no, at six".
 - The live words are a preview of the last 14 seconds; the final text arrives when you
   let go. On a 4-minute dictation that final pass takes about 1.4 s.
 - If you press Enter within a few hundred milliseconds of letting go, the Enter can reach

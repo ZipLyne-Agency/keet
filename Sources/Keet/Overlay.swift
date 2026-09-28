@@ -49,11 +49,26 @@ private struct Waveform: View {
                 let level = levels[min(distance, levels.count - 1)]
                 let envelope = 1 - CGFloat(distance) * 0.12
                 Capsule(style: .continuous)
-                    .fill(.white.opacity(0.94))
+                    .fill(Term.green)
                     .frame(width: 3, height: 4 + 19 * level * envelope * jitter[i])
             }
         }
         .animation(.interpolatingSpring(stiffness: 600, damping: 28), value: levels)
+    }
+}
+
+/// Witzper's pulsing red "recording" dot.
+private struct RecordingDot: View {
+    let active: Bool
+    @State private var dim = false
+
+    var body: some View {
+        Circle()
+            .fill(active ? Term.red : Term.amber)
+            .frame(width: 8, height: 8)
+            .opacity(dim ? 0.35 : 1)
+            .shadow(color: (active ? Term.red : Term.amber).opacity(0.8), radius: 3)
+            .onAppear { withAnimation(.easeInOut(duration: 0.6).repeatForever()) { dim = true } }
     }
 }
 
@@ -65,7 +80,7 @@ private struct ThinkingDots: View {
                 ForEach(0..<5, id: \.self) { i in
                     let wave = max(0, sin(t * 10 - Double(i) * 0.75))
                     Circle()
-                        .fill(.white)
+                        .fill(Term.amber)
                         .frame(width: 4, height: 4)
                         .opacity(0.3 + 0.7 * wave)
                         .scaleEffect(0.85 + 0.35 * wave)
@@ -97,22 +112,27 @@ private struct Pill: View {
             if model.phase == .transcribing {
                 ThinkingDots().transition(.opacity)
             } else {
-                Waveform(levels: model.levels, jitter: model.jitter, bars: model.liveText.isEmpty ? 11 : 7)
+                Waveform(levels: model.levels, jitter: model.jitter, bars: model.liveText.isEmpty ? 9 : 7)
                     .transition(.opacity)
             }
         }
     }
 
     private var compact: some View {
-        indicator
-            .frame(width: 104, height: 32)
-            .background(Capsule(style: .continuous).fill(Color(white: 0.06).opacity(0.92)))
-            .overlay(Capsule(style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+        HStack(spacing: 9) {
+            RecordingDot(active: model.phase == .listening)
+            indicator
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        // The border is a filled capsule behind a 1-point-smaller one: stroking a capsule
+        // this short leaves small ticks at its ends.
+        .background(Capsule().fill(Term.black.opacity(0.96)).padding(1).background(Capsule().fill(Term.border)))
     }
 
     /// Hugs short phrases and grows with the words, up to two lines at full width.
     private var captionWidth: CGFloat {
-        let font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
         let ideal = (model.liveText as NSString).size(withAttributes: [.font: font]).width + 4
         return min(max(ideal, 60), OverlayController.captionTextWidth)
     }
@@ -120,10 +140,11 @@ private struct Pill: View {
     /// The pill grown into a caption: waveform on the left, newest words on the right.
     private var caption: some View {
         HStack(spacing: 12) {
+            RecordingDot(active: model.phase == .listening)
             indicator.frame(width: 44, height: 24)
             Text(model.liveText)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.white.opacity(0.95))
+                .font(.mono(13, .medium))
+                .foregroundStyle(Term.green)
                 .lineLimit(2)
                 .truncationMode(.head)
                 .frame(width: captionWidth, alignment: .leading)
@@ -132,8 +153,8 @@ private struct Pill: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(white: 0.06).opacity(0.94)))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Term.black.opacity(0.95)))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Term.border, lineWidth: 1))
         .transition(.scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
     }
 }
@@ -146,22 +167,21 @@ private struct ResultCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "text.cursor")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(model.cardNote)
-                    .font(.system(size: 11, weight: .medium))
+            HStack(spacing: 8) {
+                Circle().fill(Term.amber).frame(width: 6, height: 6)
+                Text(model.cardNote.uppercased())
+                    .font(.mono(10, .bold))
+                    .foregroundStyle(Term.amber)
+                    .lineLimit(1)
                 Spacer(minLength: 8)
                 Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                    Text("×").font(.mono(13, .bold)).foregroundStyle(Term.dim)
                         .frame(width: 20, height: 20)
-                        .background(Circle().fill(.white.opacity(0.09)))
-                        .contentShape(Circle())
+                        .overlay(Rectangle().stroke(Term.border, lineWidth: 1))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
-            .foregroundStyle(.white.opacity(0.5))
 
             Group {
                 if text.count > 280 {
@@ -174,19 +194,17 @@ private struct ResultCard: View {
             .onTapGesture(perform: onCopy)
 
             HStack {
+                Text("CLICK THE TEXT OR PRESS COPY").font(.mono(9)).foregroundStyle(Term.faint)
                 Spacer()
                 Button(action: onCopy) {
-                    HStack(spacing: 6) {
-                        Image(systemName: model.copied ? "checkmark" : "doc.on.doc")
-                            .contentTransition(.symbolEffect(.replace))
-                        Text(model.copied ? "Copied" : "Copy")
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(.white))
-                    .contentShape(Capsule())
+                    Text(model.copied ? "COPIED" : "COPY")
+                        .font(.mono(11, .bold))
+                        .foregroundStyle(model.copied ? Term.black : Term.amber)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(model.copied ? Term.green : Color.clear)
+                        .overlay(Rectangle().stroke(model.copied ? Term.green : Term.amber, lineWidth: 1))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .animation(.easeOut(duration: 0.15), value: model.copied)
@@ -194,22 +212,23 @@ private struct ResultCard: View {
         }
         .padding(14)
         .frame(width: ResultCard.width)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.06).opacity(0.94)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.13), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Term.black.opacity(0.97)))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Term.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 16, y: 6)
     }
 
-    static let width: CGFloat = 380
+    static let width: CGFloat = 400
 
     private func transcript(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 14))
-            .lineSpacing(2)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("▸").font(.mono(12)).foregroundStyle(Term.green.opacity(0.7))
+            Text(text)
+                .font(.mono(13))
+                .lineSpacing(3)
+                .foregroundStyle(Term.green)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -400,11 +419,11 @@ final class OverlayController {
 
 extension OverlayController {
     /// Renders the overlay in a given state off screen (design review, docs).
-    static func renderPreview(to url: URL, configure: (OverlayModel) -> Void) {
+    static func renderPreview(to url: URL, height: CGFloat = 140, configure: (OverlayModel) -> Void) {
         let model = OverlayModel()
         configure(model)
         let view = NSHostingView(rootView: OverlayRoot(model: model, onCopy: {}, onClose: {}))
-        let size = NSSize(width: listeningSize.width, height: 140)
+        let size = NSSize(width: listeningSize.width, height: height)
         let window = NSWindow(
             contentRect: NSRect(x: -20_000, y: -20_000, width: size.width, height: size.height),
             styleMask: [.borderless], backing: .buffered, defer: false)

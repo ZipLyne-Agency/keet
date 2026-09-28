@@ -10,6 +10,9 @@ import KeetCore
 // keet-bench noise <dir> [noise dB] [peak dB...]  word error rate by speech level over room noise
 // keet-bench vocab <dir> <words.txt>        transcripts without and with a dictionary
 // keet-bench mic <seconds>                  microphone start latency, then transcribe
+// keet-bench cleanup <history.json|lines.txt> [dictionary.json]
+//                                           run the AI cleanup over real transcripts: what it
+//                                           changed, what it refused, and how long it took
 
 func now() -> Double { CFAbsoluteTimeGetCurrent() }
 func ms(_ t: Double) -> String { String(format: "%.0f ms", t * 1000) }
@@ -24,6 +27,11 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first else {
     print("usage: keet-bench transcribe <file>... | lastword <dir> | mic <seconds>")
     exit(2)
+}
+
+if command == "cleanup" {
+    try await runCleanup(Array(args.dropFirst()))
+    exit(0)
 }
 
 let transcriber = Transcriber()
@@ -230,4 +238,43 @@ case "mic":
 default:
     print("unknown command \(command)")
     exit(2)
+}
+
+func runCleanup(_ args: [String]) async throws {
+    guard let input = args.first else {
+        print("usage: keet-bench cleanup <history.json|lines.txt> [dictionary.json]")
+        exit(2)
+    }
+    func jsonTexts(_ path: String) throws -> [String] {
+        let items = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [[String: Any]]
+        return (items ?? []).compactMap { $0["text"] as? String }
+    }
+    let texts = input.hasSuffix(".json")
+        ? try jsonTexts(input)
+        : try String(contentsOfFile: input, encoding: .utf8).split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    let terms = args.count > 1 ? try jsonTexts(args[1]) : []
+    let cleanup = Cleanup()
+    print("availability: \(cleanup.availability), \(texts.count) texts, \(terms.count) dictionary words")
+    guard cleanup.availability == .ready else { return }
+
+    var notes: [String: Int] = [:]
+    var modelMs: [Int] = []
+    for text in texts {
+        // As in the app: warm the model when the key goes down, then speak.
+        cleanup.prepare()
+        try await Task.sleep(for: .milliseconds(600))
+        let result = await cleanup.clean(text, protecting: terms)
+        notes[result.note, default: 0] += 1
+        if !result.note.hasPrefix("skipped") { modelMs.append(result.ms) }
+        guard result.changed || result.note.hasPrefix("rejected") || result.note.hasPrefix("model") || result.note == "timed out"
+        else { continue }
+        print("\n[\(result.ms) ms, \(result.note)]")
+        print("  raw: \(text)")
+        if result.changed { print("  out: \(result.text)") }
+    }
+    print("\n" + notes.sorted { $0.value > $1.value }.map { "\($0.value) \($0.key)" }.joined(separator: ", "))
+    let sorted = modelMs.sorted()
+    if !sorted.isEmpty {
+        print("model calls: \(sorted.count), median \(sorted[sorted.count / 2]) ms, p90 \(sorted[sorted.count * 9 / 10]) ms, max \(sorted.last!) ms")
+    }
 }

@@ -26,6 +26,14 @@ struct Dictation: Codable, Identifiable, Equatable {
     var peakDb: Float?
     /// Room noise estimated for the recording, in dBFS.
     var noiseDb: Float?
+    /// Listening after the key came up, before the model ran.
+    var tailMs: Int?
+    /// The model's own time.
+    var transcribeMs: Int?
+    /// What the speech model heard, when AI cleanup changed it.
+    var rawText: String?
+    /// Time the AI cleanup took, when it ran.
+    var cleanupMs: Int?
 
     var words: Int { text.split(whereSeparator: \.isWhitespace).count }
 }

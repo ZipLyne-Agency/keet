@@ -46,6 +46,8 @@ final class AppController: ObservableObject {
     @Published var startSoundOn: Bool = UserDefaults.standard.object(forKey: "startSound") as? Bool ?? true {
         didSet { UserDefaults.standard.set(startSoundOn, forKey: "startSound") }
     }
+    /// Live input level (0...1) while dictating or testing, for the window's meter.
+    @Published private(set) var liveLevel: Float = 0
     @Published private(set) var micTestPeakDb: Float = -120
     @Published private(set) var micTestNoiseDb: Float = -120
     /// macOS voice processing: noise suppression and echo cancellation on the input.
@@ -63,6 +65,12 @@ final class AppController: ObservableObject {
             }
         }
     }
+    /// Tidy each dictation with Apple's on-device model before it's pasted.
+    @Published var aiCleanup: Bool = UserDefaults.standard.object(forKey: "aiCleanup") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(aiCleanup, forKey: "aiCleanup") }
+    }
+    /// Whether Apple Intelligence can run the cleanup on this Mac.
+    var cleanupAvailability: Cleanup.Availability { cleanup.availability }
     /// Show words in the pill while you talk.
     @Published var livePreview: Bool = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? false {
         didSet { UserDefaults.standard.set(livePreview, forKey: "livePreview") }
@@ -75,6 +83,7 @@ final class AppController: ObservableObject {
     let hotkey: HotkeyMonitor
     private let inserter = TextInserter()
     private let transcriber = Transcriber()
+    private let cleanup = Cleanup()
     private let recorder: AudioRecorder
     private let audioQueue = DispatchQueue(label: "keet.audio", qos: .userInteractive)
     private let tail = TailPolicy()
@@ -300,6 +309,7 @@ final class AppController: ObservableObject {
                 let done = CFAbsoluteTimeGetCurrent() - started > 10
                 DispatchQueue.main.async {
                     self?.micTestLevel = level
+                    self?.liveLevel = level
                     self?.micTestPeakDb = recentPeak
                     self?.micTestNoiseDb = noise
                     if done { self?.stopMicTest() }
@@ -314,6 +324,7 @@ final class AppController: ObservableObject {
         guard isTestingMic else { return }
         isTestingMic = false
         micTestLevel = 0
+        liveLevel = 0
         micTestPeakDb = -120
         micTestNoiseDb = -120
         audioQueue.async { [weak self, recorder] in
@@ -347,6 +358,7 @@ final class AppController: ObservableObject {
         if isTestingMic { stopMicTest() }
         if overlay.isShowingResult { overlay.hide() }
         inserter.prime()
+        if cleanupWanted { Task.detached(priority: .userInitiated) { [cleanup] in cleanup.prepare() } }
 
         // A new press during the previous dictation's tail finishes that one now.
         if let previous = session {
@@ -447,6 +459,7 @@ final class AppController: ObservableObject {
         log.notice("session \(current.id): cancelled")
         session = nil
         phase = .idle
+        liveLevel = 0
         overlay.hide()
         audioQueue.async { [recorder] in
             guard !current.finished else { return }
@@ -472,7 +485,10 @@ final class AppController: ObservableObject {
         if now - current.lastMeterPush >= 1.0 / 40 {
             current.lastMeterPush = now
             let level = current.tracker.meterLevel
-            DispatchQueue.main.async { [weak self] in self?.overlay.push(level: level) }
+            DispatchQueue.main.async { [weak self] in
+                self?.overlay.push(level: level)
+                self?.liveLevel = level
+            }
         }
 
         if recorder.isNearlyFull {
@@ -502,15 +518,18 @@ final class AppController: ObservableObject {
         log.notice("session \(current.id): first audio after \(startLatency) ms, tail \(tailMs) ms, \(samples.count) samples, noise \(Int(t.noiseFloorDb)) dB, threshold \(Int(t.speechThresholdDb)) dB, peak \(Int(t.peakDb)) dB")
         let peak = t.peakDb, noise = t.noiseFloorDb
         DispatchQueue.main.async { [weak self] in
-            self?.transcribe(samples, rate: rate, released: released, peakDb: peak, noiseDb: noise, session: current)
+            self?.transcribe(samples, rate: rate, released: released, peakDb: peak, noiseDb: noise,
+                             tailMs: tailMs, session: current)
         }
     }
 
     private func transcribe(
-        _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, noiseDb: Float, session current: Session
+        _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, noiseDb: Float, tailMs: Int,
+        session current: Session
     ) {
         let isLatest = session === current || session == nil
         if session === current { session = nil }
+        liveLevel = 0
         if isLatest {
             phase = .transcribing
             overlay.showTranscribing()
@@ -530,12 +549,26 @@ final class AppController: ObservableObject {
                 log.error("transcription failed: \(error.localizedDescription, privacy: .public)")
             }
             let transcribeMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            var cleaned: Cleanup.Result?
+            if self.cleanupWanted, !text.isEmpty {
+                let result = await self.cleanup.clean(text, protecting: self.dictionary.words.map(\.text))
+                log.notice("session \(current.id): cleanup \(result.ms) ms, \(result.note, privacy: .public)")
+                cleaned = result
+            }
             let latencyMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
             let keepOnly = await self.keepOnly(current)
-            self.deliver(text, ownsOverlay: isLatest, audioSeconds: Double(samples.count) / max(rate, 1),
-                         latencyMs: latencyMs, peakDb: peakDb, noiseDb: noiseDb, keepOnly: keepOnly)
+            self.deliver(cleaned?.text ?? text, raw: cleaned?.changed == true ? text : nil, ownsOverlay: isLatest,
+                         audioSeconds: Double(samples.count) / max(rate, 1),
+                         latencyMs: latencyMs, peakDb: peakDb, noiseDb: noiseDb,
+                         timing: (tailMs, transcribeMs, cleaned?.ms), keepOnly: keepOnly)
             log.notice("session \(current.id): transcribe \(transcribeMs) ms, release to text \(latencyMs) ms")
         }
+    }
+
+    /// Cleanup is on and this isn't an insertion test. Whether Apple Intelligence can
+    /// run it is checked off the main thread, so key down stays fast.
+    private var cleanupWanted: Bool {
+        aiCleanup && !Self.testing && ProcessInfo.processInfo.environment["KEET_FAKE_TEXT"] == nil
     }
 
     private nonisolated func keepOnly(_ current: Session) async -> Bool {
@@ -545,8 +578,8 @@ final class AppController: ObservableObject {
     }
 
     private func deliver(
-        _ text: String, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float, noiseDb: Float,
-        keepOnly: Bool
+        _ text: String, raw: String?, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float,
+        noiseDb: Float, timing: (tail: Int, model: Int, cleanup: Int?), keepOnly: Bool
     ) {
         // A newer dictation may already be showing its pill; leave that alone.
         let ownsOverlay = ownsOverlay && session == nil
@@ -560,7 +593,8 @@ final class AppController: ObservableObject {
             let app = NSWorkspace.shared.frontmostApplication
             history.add(Dictation(
                 date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
-                audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb, noiseDb: noiseDb))
+                audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb, noiseDb: noiseDb,
+                tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup))
             return
         }
         let target = inserter.currentTarget()
@@ -580,6 +614,7 @@ final class AppController: ObservableObject {
         }
         history.add(Dictation(
             date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
-            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb, noiseDb: noiseDb))
+            audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb, noiseDb: noiseDb,
+            tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup))
     }
 }
