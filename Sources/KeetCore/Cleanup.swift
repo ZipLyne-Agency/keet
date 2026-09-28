@@ -78,6 +78,7 @@ public final class Cleanup: @unchecked Sendable {
         let count = Self.words(raw).count
         if count < minimumWords { return finish(nil, "skipped: short") }
         if count > maximumWords { return finish(nil, "skipped: long") }
+        if !Self.hasSomethingToRemove(raw) { return finish(nil, "skipped: nothing to remove") }
 
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *), availability == .ready else { return finish(nil, "skipped: unavailable") }
@@ -318,6 +319,19 @@ public final class Cleanup: @unchecked Sendable {
     ]
     /// Said twice on purpose.
     private static let emphasis: Set<String> = ["really", "very", "so", "no", "much", "super", "way", "too", "yes", "yeah", "bye", "ha"]
+
+    /// Whether the rules would let anything be removed from this transcript: a filler,
+    /// a filler "like", "you know", "I mean," or a repeat. Most dictations have none of
+    /// these, and then the model call (about a third of a second) is skipped.
+    static func hasSomethingToRemove(_ text: String) -> Bool {
+        let raw = tokens(text)
+        for start in raw.indices {
+            for length in 1...min(4, raw.count - start) where removable(Array(start..<(start + length)), in: raw) {
+                return true
+            }
+        }
+        return false
+    }
 
     /// Whether every word in a deleted run is a filler or a repeat.
     private static func removable(_ indices: [Int], in raw: [Token]) -> Bool {

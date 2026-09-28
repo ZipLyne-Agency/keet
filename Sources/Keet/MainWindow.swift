@@ -943,7 +943,7 @@ private struct SettingsTab: View {
                     SectionHeader(title: "GENERAL")
                     VStack(spacing: 10) {
                         toggle("START SOUND", "Chime when Keet starts hearing you", $controller.startSoundOn)
-                        toggle("AI CLEANUP", "Drop um and filler like, fix misheard words", $controller.aiCleanup)
+                        toggle("AI CLEANUP", "Drop um, uh, filler like and repeats", $controller.aiCleanup)
                         toggle("LIVE WORDS", "Show words in the pill while you talk", $controller.livePreview)
                         toggle("OPEN AT LOGIN", "Start Keet when you log in", $openAtLogin)
                             .onChange(of: openAtLogin) { _, on in
@@ -988,7 +988,7 @@ private struct SettingsTab: View {
                         KV(key: "MODEL", value: "APPLE FOUNDATION MODEL")
                         KV(key: "RUNS ON", value: "THIS MAC · APPLE INTELLIGENCE", color: Term.green)
                         KV(key: "STATUS", value: cleanupStatus, color: controller.cleanupAvailability == .ready ? Term.amber : Term.red)
-                        Text("THE MODEL SUGGESTS EDITS; KEET KEEPS ONLY SAFE ONES: FILLERS, REPEATS, NEAR-SOUNDING WORD FIXES, PUNCTUATION. IT NEVER DROPS, ADDS, OR REORDERS YOUR WORDS. SKIPPED OVER 100 WORDS.")
+                        Text("THE MODEL SUGGESTS EDITS; KEET KEEPS ONLY SAFE ONES: FILLERS, REPEATS, NEAR-SOUNDING WORD FIXES, PUNCTUATION. IT NEVER DROPS, ADDS, OR REORDERS YOUR WORDS. SKIPPED WHEN THERE'S NOTHING TO REMOVE, AND OVER 100 WORDS.")
                             .font(.termSmall).foregroundStyle(Term.dim).lineSpacing(3)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.top, 2)

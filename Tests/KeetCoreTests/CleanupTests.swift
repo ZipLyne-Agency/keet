@@ -56,6 +56,17 @@ struct CleanupRuleTests {
         }
     }
 
+    @Test func modelRunsOnlyWhenSomethingCanBeRemoved() {
+        #expect(Cleanup.hasSomethingToRemove("What's the whole uh voice feature we created?"))
+        #expect(Cleanup.hasSomethingToRemove("Could I could I use the other one?"))
+        #expect(Cleanup.hasSomethingToRemove("for the past couple of days, you know."))
+        #expect(Cleanup.hasSomethingToRemove("There's like a pop-up that blocks the screen."))
+        #expect(!Cleanup.hasSomethingToRemove("I don't like the audio tags."))
+        #expect(!Cleanup.hasSomethingToRemove("It took like five minutes."))
+        #expect(!Cleanup.hasSomethingToRemove("Make it look really really good."))
+        #expect(!Cleanup.hasSomethingToRemove("Ship everything and delete the current episode."))
+    }
+
     @Test func wordSwapsAreNarrow() {
         #expect(cleaned("Are there any apps that could control my max menu bar?",
                         "Are there any apps that could control my Mac menu bar?")

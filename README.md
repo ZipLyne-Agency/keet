@@ -22,7 +22,8 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
   (ZipLyne, not "zip line").
 - **AI cleanup, on the Mac.** Apple's on-device model drops "um", filler "like" and
   repeated words. Strict rules keep only those edits, so it can't change what you meant.
-  It needs Apple Intelligence (macOS 26 or later) and adds about a third of a second.
+  Dictations with nothing to remove skip it and wait nothing extra; the rest wait about
+  half a second. It needs Apple Intelligence (macOS 26 or later).
   See [how](docs/REMAKE.md#ai-cleanup).
 - **Your choice of microphone**, with an input volume slider and a live level test.
 

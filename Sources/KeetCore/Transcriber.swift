@@ -21,16 +21,12 @@ public final class Transcriber: @unchecked Sendable {
     ]
 
     private let converter = AudioConverter()
+    private let manager = UnifiedAsrManager()
     private let lock = NSLock()
-    private var _manager = UnifiedAsrManager()
     private var ctcModels: CtcModels?
-    private var vocabularyActive = false
-
-    /// Swapped out when the dictionary is cleared (FluidAudio can't switch boosting off).
-    private var manager: UnifiedAsrManager {
-        get { lock.lock(); defer { lock.unlock() }; return _manager }
-        set { lock.lock(); _manager = newValue; lock.unlock() }
-    }
+    /// The Dictionary's word spotter and its words. Keet runs it itself rather than
+    /// through the manager, so it can apply the swaps safely (see VocabularyGuard).
+    private var boosting: (session: VocabularyBoostingSession, words: [VocabularyWord])?
 
     public init() {}
 
@@ -68,14 +64,11 @@ public final class Transcriber: @unchecked Sendable {
 
     /// Makes the model prefer these words. The first call loads (or downloads, about
     /// 100 MB) Parakeet CTC 110M, which spots the words in the audio; a transcript word
-    /// is replaced only when the audio supports the dictionary word better.
+    /// is replaced only when the audio supports the dictionary word better and
+    /// VocabularyGuard agrees the swap is safe.
     public func setVocabulary(_ words: [VocabularyWord]) async throws {
         if words.isEmpty {
-            guard vocabularyActive else { return }
-            let fresh = UnifiedAsrManager()
-            try await fresh.loadModels(from: Self.modelDirectory)
-            manager = fresh
-            vocabularyActive = false
+            lock.withLock { boosting = nil }
             return
         }
         if ctcModels == nil {
@@ -90,8 +83,9 @@ public final class Transcriber: @unchecked Sendable {
                 text: $0.text, aliases: $0.heardAs.isEmpty ? nil : $0.heardAs,
                 minSimilarity: Self.minSimilarity(for: $0.text))
         })
-        try await manager.configureVocabularyBoosting(vocabulary: context, ctcModels: ctcModels)
-        vocabularyActive = true
+        let session = try await VocabularyBoostingSession(
+            vocabulary: context, ctcModels: ctcModels, config: VocabularyBoostingSession.itnDefaultConfig)
+        lock.withLock { boosting = (session, words) }
     }
 
     public static var modelIsPresent: Bool {
@@ -127,8 +121,18 @@ public final class Transcriber: @unchecked Sendable {
         if trailingPadMs > 0 {
             input.append(contentsOf: Self.quietPad(ms: trailingPadMs))
         }
-        let text = try await manager.transcribe(input)
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let (session, words) = lock.withLock({ boosting }) else {
+            return try await manager.transcribe(input).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let plain = try await manager.transcribeWithTimings(input)
+        guard let rescored = await session.rescore(text: plain.text, tokenTimings: plain.tokenTimings, audioSamples: input),
+              rescored.wasModified
+        else { return plain.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let swaps = rescored.replacements.filter(\.shouldReplace).compactMap { result in
+            result.replacementWord.map { VocabularyGuard.Swap(heard: result.originalWord, term: $0) }
+        }
+        return VocabularyGuard.apply(swaps, to: plain.text, words: words, isEnglishWord: EnglishWords.contains)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public static var defaultTrailingPadMs = 0

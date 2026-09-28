@@ -324,6 +324,30 @@ five product-name fixes above still happen. It adds about 100 ms per dictation (
 runs over the audio), and loading it takes about 12 s the very first time (Core ML
 compiling for the Neural Engine) and about 0.15 s after that.
 
+Keet doesn't let FluidAudio apply its swaps. FluidAudio rebuilds the sentence around
+each swap, and run over 108 spoken sentences full of AI and coding terms (three macOS
+voices each) with an 89-word dictionary, that rebuild dropped the period and the "'s"
+next to a swapped word ("Claude's" became "Claude"), swallowed small neighbors ("the
+React native" became "React Native", "open a PR" became "OpenAI PR", "Ask Claude to"
+became "CLAUDE.md"), and turned ordinary words into dictionary words ("Google Cloud
+Console" became "Google Claude Console", "Rebase" became "Firebase", "Llama" became
+"Ollama"). So `Transcriber` transcribes with word timings, asks FluidAudio's
+`VocabularyBoostingSession` for its swaps, and `VocabularyGuard` applies each one only if
+what was heard is the dictionary word or one of its "heard as" spellings, or else it
+doesn't pull in a small word ("the", "to", "a", "and"...) at either edge and isn't a real
+English word (checked against `/usr/share/dict/words`, plurals included) unless it is
+nearly the dictionary word already. Punctuation and "'s" around the heard words stay.
+With the guard, every one of those mistakes went away and every real fix stayed:
+Claude from "clawed", Claude Code from "cloud code", Codex from "codec", Vercel from
+"Versal", tmux from "Mux", Kimi from "Kimmy", Infisical from "in physical", ElevenLabs
+from "11 labs", Postgres from "postgers", and 20 more. The one trade-off kept on purpose:
+with "codec" listed as a way "Codex" is misheard, the word "codec" becomes Codex.
+
+Which words to add was measured, not guessed: Parakeet already writes Anthropic, Opus,
+Fable, Gemini, Cursor, GitHub, Cloudflare, TypeScript, Docker, Stripe, Sentry and about 40
+more AI and coding terms correctly, so they aren't in the dictionary; a word that is
+already right can only be made wrong. `VocabularyGuardTests` holds the swaps above.
+
 `keet-bench vocab <clips> <words.txt>` transcribes clips without and then with a
 dictionary, one word per line, optionally followed by `|` and comma-separated
 "heard as" spellings. `KEET_VOCAB_MINSIM` overrides the similarity bar.
@@ -365,11 +389,22 @@ thrown away. The same 180 dictations then came out with only safe edits: 31 chan
 unchanged, 20 too short to bother. `Tests/KeetCoreTests/CleanupTests.swift` holds the
 real failures above as tests.
 
-Speed is the cost. The model writes about 60 words a second, runs one request at a time
+Most dictations have nothing to remove, so the model isn't asked. Before calling it,
+`Cleanup.hasSomethingToRemove` runs the removal rules from the table above over every
+word and run of up to four words; if none would be accepted, the transcript goes out as
+is. Over 290 real dictations long enough to clean, 243 (84%) skipped the model this way.
+The cost: without a filler to remove, the model's other edits don't happen either.
+Of the 31 dictations it had changed before, 8 lost their only change: a period added at
+the end, a capital letter lowered mid-sentence, and one agreement fix ("there are no
+ending music" to "there is").
+
+Speed is the cost for the rest. The model writes about 60 words a second, runs one request at a time
 (four at once took as long as four in a row), and its first call takes about a second.
 Keet creates and prewarms a session when the key goes down, so by the time you let go
 the instructions are already processed. Measured on those 180 dictations (median 13
-words, longest 74): 350 ms median, 680 ms at the 90th percentile, 1.3 s at most. Inside
+words, longest 74): 350 ms median, 680 ms at the 90th percentile, 1.3 s at most, for
+every dictation it ran on. Dictations with fillers run longer than average, so for
+those alone the median is about 600 ms. Inside
 the menu bar app it measured 264 ms median over 30, with no rate limiting. Dictations
 under four words skip it, dictations over 100 words skip it (they'd take about two
 seconds), and a call that runs past 0.7 s plus 22 ms a word is cancelled and the
@@ -544,6 +579,7 @@ typing: the pasted text lands in whatever app has focus.
 | `Sources/KeetCore/AudioDevices.swift` | Listing input devices and watching for changes |
 | `Sources/KeetCore/SpeechTail.swift` | Loudness tracking, noise floor, threshold, the tail rule |
 | `Sources/KeetCore/Cleanup.swift` | AI cleanup and the rules that decide which edits are kept |
+| `Sources/KeetCore/VocabularyGuard.swift` | Which of the Dictionary's word swaps are applied |
 | `Sources/Keet/AppController.swift` | One dictation from key press to delivered text |
 | `Sources/Keet/HotkeyMonitor.swift` | The event tap and bare-key rules |
 | `Sources/Keet/TextInserter.swift` | Focus detection, paste, clipboard restore |
@@ -554,7 +590,7 @@ typing: the pasted text lands in whatever app has focus.
 | `Sources/Keet/StartSound.swift` | The start chime |
 | `Sources/Keet/StatusMenu.swift` | The menu bar item |
 | `Sources/keet-bench/` | Benchmarks and experiments |
-| `Tests/KeetCoreTests/` | Tests for the tail rule and the cleanup rules |
+| `Tests/KeetCoreTests/` | Tests for the tail rule, the cleanup rules and the dictionary guard |
 | `scripts/` | Build, model download, icon, test clips, key driver |
 
 ## Troubleshooting
