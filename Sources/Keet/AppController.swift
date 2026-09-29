@@ -89,6 +89,7 @@ final class AppController: ObservableObject {
     private let tail = TailPolicy()
     private var deviceWatcher: AudioDeviceWatcher?
     private var activationObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
     private var micTestTimer: DispatchSourceTimer?
     private var liveTask: Task<Void, Never>?
 
@@ -108,6 +109,9 @@ final class AppController: ObservableObject {
         var tracker: EnergyTracker
         var readIndex = 0
         var firstAudio: CFAbsoluteTime?
+        /// When the microphone started, for the no-audio watchdog.
+        var captureStarted: CFAbsoluteTime?
+        var captureRebuilt = false
         var pump: DispatchSourceTimer?
         var finished = false
         var lastMeterPush: CFAbsoluteTime = 0
@@ -151,6 +155,11 @@ final class AppController: ObservableObject {
         refreshDevices()
         deviceWatcher = AudioDeviceWatcher { [weak self] in
             MainActor.assumeIsolated { self?.devicesChanged() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.systemWoke() }
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -381,6 +390,7 @@ final class AppController: ObservableObject {
             }
             // The device rate is known only once the engine is built.
             current.tracker = EnergyTracker(sampleRate: recorder.sampleRate)
+            current.captureStarted = CFAbsoluteTimeGetCurrent()
             let pump = DispatchSource.makeTimerSource(queue: self.audioQueue)
             pump.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(2))
             pump.setEventHandler { [weak self] in self?.pumpTick(current) }
@@ -473,6 +483,13 @@ final class AppController: ObservableObject {
     /// whether the speaker has finished their last word.
     private nonisolated func pumpTick(_ current: Session) {
         guard !current.finished else { return }
+        // A rebuilt engine starts cold, so give it longer.
+        let timeout = current.captureRebuilt ? max(1.5, recorder.firstAudioTimeout) : recorder.firstAudioTimeout
+        if current.firstAudio == nil, let started = current.captureStarted,
+           CFAbsoluteTimeGetCurrent() - started > timeout, recorder.capturedCount == 0 {
+            noAudioYet(current, waitedMs: Int((CFAbsoluteTimeGetCurrent() - started) * 1000))
+            return
+        }
         let count = recorder.capturedCount
         if count > current.readIndex {
             let fresh = recorder.samples(from: current.readIndex, to: count)
@@ -501,6 +518,50 @@ final class AppController: ObservableObject {
         let elapsedMs = Int((now - released) * 1000)
         guard tail.shouldStop(elapsedMs: elapsedMs, trailingQuietMs: current.tracker.trailingQuietMs) else { return }
         finish(current)
+    }
+
+    /// The microphone started but nothing came in. Rebuild it once on the devices as
+    /// they are now; if that doesn't help either, stop and say so instead of showing
+    /// a pill that listens to nothing. Runs on `audioQueue`.
+    private nonisolated func noAudioYet(_ current: Session, waitedMs: Int) {
+        if !current.captureRebuilt {
+            current.captureRebuilt = true
+            log.error("session \(current.id): no audio \(waitedMs) ms after the microphone started; rebuilding it")
+            do {
+                try recorder.rebuildAndRestart()
+                current.tracker = EnergyTracker(sampleRate: recorder.sampleRate)
+                current.readIndex = 0
+                current.captureStarted = CFAbsoluteTimeGetCurrent()
+                return
+            } catch {
+                log.error("session \(current.id): rebuilding the microphone failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else {
+            log.error("session \(current.id): still no audio after rebuilding the microphone")
+        }
+        current.finished = true
+        current.pump?.cancel()
+        recorder.stop()
+        recorder.invalidate()
+        let name = recorder.activeDeviceName ?? "the microphone"
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.session === current { self.session = nil }
+            self.phase = .idle
+            self.liveLevel = 0
+            NSSound.beep()
+            self.overlay.showResult(
+                "Keet isn't getting any sound from \(name).",
+                note: "Try again, or pick another microphone in Settings.")
+        }
+    }
+
+    /// After sleep, USB docks and their microphones can come back with new device
+    /// IDs. Rebuild once things have settled so the first dictation doesn't hit a
+    /// stale engine.
+    private func systemWoke() {
+        log.notice("system woke; rebuilding the microphone shortly")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.devicesChanged() }
     }
 
     /// Stops capture and hands the audio to the model. Runs on `audioQueue`.

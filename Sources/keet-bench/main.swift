@@ -10,6 +10,8 @@ import KeetCore
 // keet-bench noise <dir> [noise dB] [peak dB...]  word error rate by speech level over room noise
 // keet-bench vocab <dir> <words.txt>        transcripts without and with a dictionary
 // keet-bench mic <seconds>                  microphone start latency, then transcribe
+// keet-bench recover                        start a microphone engine that gets no audio, as
+//                                           after sleep, and check the rebuild brings it back
 // keet-bench cleanup <history.json|lines.txt> [dictionary.json]
 //                                           run the AI cleanup over real transcripts: what it
 //                                           changed, what it refused, and how long it took
@@ -27,6 +29,24 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first else {
     print("usage: keet-bench transcribe <file>... | lastword <dir> | mic <seconds>")
     exit(2)
+}
+
+if command == "recover" {
+    let recorder = AudioRecorder()
+    AudioRecorder.dropAudioOnNextBuild = true
+    try recorder.start()
+    let started = now()
+    while recorder.capturedCount == 0 && now() - started < recorder.firstAudioTimeout { usleep(5_000) }
+    print("deaf engine: \(recorder.capturedCount) samples after \(ms(now() - started))")
+    let rebuilt = now()
+    try recorder.rebuildAndRestart()
+    while recorder.capturedCount == 0 && now() - rebuilt < 2 { usleep(1_000) }
+    let first = now() - rebuilt
+    usleep(300_000)
+    let captured = recorder.capturedCount
+    print("after rebuild: first audio \(ms(first)), \(captured) samples in the next 300 ms at \(Int(recorder.sampleRate)) Hz on \(recorder.activeDeviceName ?? "?")")
+    _ = recorder.stop()
+    exit(captured == 0 ? 1 : 0)
 }
 
 if command == "cleanup" {

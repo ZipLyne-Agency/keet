@@ -245,6 +245,30 @@ as "the microphone went away" ended every dictation at 145 ms. Keet only reacts 
 engine has actually stopped. It also rebuilds the engine when devices come and go or
 the input's audio format changed while idle.
 
+Waking from sleep broke this once. A USB dock re-enumerated its devices while Keet was
+building an engine for the chosen microphone: the engine was set to the device's old ID
+(which by then had no input), read that device's format (2 channels, 44.1 kHz),
+connected the sink with it, and then CoreAudio moved it to the microphone's new ID
+(1 channel, 48 kHz). The engine ran, the pill showed, and no audio ever reached the sink:
+every dictation from then on had 0 samples. The check before each start compared the
+input node's output format with the one the engine was built with, but once the sink is
+connected that output format just reports the connection's format, so it always
+matched. Three changes:
+
+- The check now compares the hardware side (`inputNode.inputFormat(forBus: 0)`) by
+  sample rate and channel count, and rebuilds on a mismatch.
+- On `NSWorkspace.didWakeNotification`, Keet rebuilds the engine 3 seconds later, once
+  devices have settled.
+- A watchdog: if no audio has arrived 0.8 s after the microphone started (2 s for
+  Bluetooth), Keet throws the engine away and builds a fresh one on the devices as they
+  are now. If that one is silent for 1.5 s too, the pill gives way to a card saying which
+  microphone isn't sending sound. A prepared engine delivers its first audio in 23 to 69
+  ms; a freshly built one takes about 400 ms, which is why the limits aren't tighter. The
+  speech before the rebuild is lost, so this is a last resort.
+
+`keet-bench recover` builds an engine that drops every buffer, waits for the timeout,
+rebuilds, and reports when audio came back (about 400 ms, on four runs).
+
 ### How loud you need to be
 
 Most wrong words come from quiet audio, not the model. `keet-bench noise` plays the test
@@ -603,6 +627,11 @@ different key in Settings.
 **macOS keeps asking for permissions after I rebuild.** The build is signed ad hoc. Build
 with a Developer ID or Apple Development certificate. To reset a stuck grant:
 `tccutil reset Accessibility agency.ziplyne.keet` and `tccutil reset Microphone agency.ziplyne.keet`.
+
+**The pill shows but nothing is typed, especially after waking the Mac.** Keet rebuilds
+its microphone connection on its own now (see [Choosing a microphone](#choosing-a-microphone)).
+If it still hears nothing, the card says so; quit and reopen Keet, and check the
+microphone in Settings with TEST.
 
 **The pill doesn't appear on one display.** If even other apps' floating windows are
 hidden there, macOS's Spaces are out of sync, which can happen after displays are

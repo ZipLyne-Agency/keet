@@ -70,6 +70,18 @@ public final class AudioRecorder: @unchecked Sendable {
 
     /// Name of the device the engine is actually built on.
     public private(set) var activeDeviceName: String?
+    private var activeTransport: InputDevice.Transport?
+
+    /// How long after `start()` the first audio should have arrived. With the engine
+    /// prepared ahead, USB and built-in microphones deliver it in 23 to 69 ms; an
+    /// engine built at that moment takes about 400 ms (measured with `keet-bench
+    /// recover`). A Bluetooth headset first switches to its call profile, which takes
+    /// longer still.
+    public var firstAudioTimeout: Double { activeTransport == .bluetooth ? 2.0 : 0.8 }
+
+    /// Test hook: the next engine built drops every buffer, like one built on a device
+    /// that re-enumerated under it. Used by `keet-bench recover`.
+    public static var dropAudioOnNextBuild = false
 
     /// macOS voice processing on the input: noise suppression, automatic gain, and echo
     /// cancellation (so sound from the Mac's own speakers is removed from the recording).
@@ -116,7 +128,9 @@ public final class AudioRecorder: @unchecked Sendable {
                 unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                 &id, UInt32(MemoryLayout<AudioDeviceID>.size))
         }
-        activeDeviceName = (chosen ?? AudioDevices.defaultInput())?.name
+        let active = chosen ?? AudioDevices.defaultInput()
+        activeDeviceName = active?.name
+        activeTransport = active?.transport
         if voiceProcessing {
             try input.setVoiceProcessingEnabled(true)
             // Keep other apps' audio at full volume while dictating.
@@ -127,7 +141,10 @@ public final class AudioRecorder: @unchecked Sendable {
         guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputDevice }
 
         let store = SampleStore(capacity: Int(format.sampleRate * Self.maximumSeconds))
+        let deaf = Self.dropAudioOnNextBuild
+        Self.dropAudioOnNextBuild = false
         let sink = AVAudioSinkNode { _, frameCount, bufferList in
+            if deaf { return noErr }
             let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
             guard let first = buffers.first, let data = first.mData else { return noErr }
             store.append(
@@ -170,11 +187,16 @@ public final class AudioRecorder: @unchecked Sendable {
             return
         }
         try prepare()
-        // The device's format can change while idle (another app switched its
-        // sample rate); an engine built for the old format would mislabel the audio.
-        if let engine, let builtFormat, engine.inputNode.outputFormat(forBus: 0) != builtFormat {
-            needsRebuild = true
-            try prepare()
+        // The device's format can change while idle (another app switched its sample
+        // rate, or the device re-enumerated after sleep). An engine built for the old
+        // format gets no audio. Compare the hardware side: once the sink is connected,
+        // the input node's output format just reports the connection's format.
+        if let engine, let builtFormat {
+            let hardware = engine.inputNode.inputFormat(forBus: 0)
+            if hardware.sampleRate != builtFormat.sampleRate || hardware.channelCount != builtFormat.channelCount {
+                needsRebuild = true
+                try prepare()
+            }
         }
         store?.reset()
         do {
@@ -187,6 +209,18 @@ public final class AudioRecorder: @unchecked Sendable {
             try engine?.start()
         }
         isRunning = true
+    }
+
+    /// Throws away the running engine, builds a fresh one on the devices as they are
+    /// now, and starts it. For a started engine that delivers no audio: after sleep,
+    /// a USB dock can re-enumerate its devices while the engine is being built, and
+    /// the engine ends up connected with a format the device no longer has.
+    /// Anything captured so far is discarded.
+    public func rebuildAndRestart() throws {
+        engine?.stop()
+        isRunning = false
+        needsRebuild = true
+        try start()
     }
 
     /// Stops capture and returns everything recorded, at `sampleRate`.
