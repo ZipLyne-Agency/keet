@@ -23,6 +23,10 @@ final class OverlayModel: ObservableObject {
     @Published var liveText = ""
     /// Heading on the Copy card.
     @Published var cardNote = "No text field selected"
+    /// When the key went down, for the timer in the pill.
+    @Published var startedAt = Date()
+    /// When the key came up; the timer stops there.
+    @Published var stoppedAt: Date?
 
     func push(level: CGFloat) {
         var next = levels
@@ -69,6 +73,26 @@ private struct RecordingDot: View {
             .opacity(dim ? 0.35 : 1)
             .shadow(color: (active ? Term.red : Term.amber).opacity(0.8), radius: 3)
             .onAppear { withAnimation(.easeInOut(duration: 0.6).repeatForever()) { dim = true } }
+    }
+}
+
+/// How long you've been talking: 0:07, 1:42, 12:03.
+private struct Elapsed: View {
+    let start: Date
+    let end: Date?
+
+    var body: some View {
+        TimelineView(.periodic(from: start, by: 1)) { context in
+            Text(Self.format((end ?? context.date).timeIntervalSince(start)))
+                .font(.mono(11, .semibold))
+                .monospacedDigit()
+                .foregroundStyle(end == nil ? Term.text : Term.dim)
+        }
+    }
+
+    static func format(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -122,6 +146,7 @@ private struct Pill: View {
         HStack(spacing: 9) {
             RecordingDot(active: model.phase == .listening)
             indicator
+            Elapsed(start: model.startedAt, end: model.stoppedAt)
         }
         .padding(.horizontal, 14)
         .frame(height: 32)
@@ -142,6 +167,7 @@ private struct Pill: View {
         HStack(spacing: 12) {
             RecordingDot(active: model.phase == .listening)
             indicator.frame(width: 44, height: 24)
+            Elapsed(start: model.startedAt, end: model.stoppedAt)
             Text(model.liveText)
                 .font(.mono(13, .medium))
                 .foregroundStyle(Term.green)
@@ -322,16 +348,19 @@ final class OverlayController {
         return false
     }
 
-    func showListening() {
+    func showListening(since start: Date = Date()) {
         dismissTimer?.invalidate()
         model.resetLevels()
         model.liveText = ""
+        model.startedAt = start
+        model.stoppedAt = nil
         present(size: Self.listeningSize, interactive: false)
         model.phase = .listening
     }
 
     func showTranscribing() {
         guard model.phase == .listening else { return }
+        model.stoppedAt = Date()
         model.phase = .transcribing
     }
 

@@ -31,6 +31,27 @@ guard let command = args.first else {
     exit(2)
 }
 
+if command == "speakers" {
+    // Mutes the default output the way a dictation does, checks, then restores.
+    func mutedNow() -> String {
+        let out = Process()
+        out.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        out.arguments = ["-e", "output muted of (get volume settings)"]
+        let pipe = Pipe(); out.standardOutput = pipe
+        try? out.run(); out.waitUntilExit()
+        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "?"
+    }
+    let mute = SpeakerMute()
+    print("before: muted \(mutedNow())")
+    print("mute(): \(mute.mute())")
+    print("during: muted \(mutedNow())")
+    usleep(500_000)
+    mute.restore()
+    print("after: muted \(mutedNow())")
+    exit(0)
+}
+
 if command == "recover" {
     let recorder = AudioRecorder()
     AudioRecorder.dropAudioOnNextBuild = true

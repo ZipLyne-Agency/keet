@@ -943,6 +943,7 @@ private struct SettingsTab: View {
                     SectionHeader(title: "GENERAL")
                     VStack(spacing: 10) {
                         toggle("START SOUND", "Chime when Keet starts hearing you", $controller.startSoundOn)
+                        toggle("MUTE SPEAKERS", "Silence the speakers while you talk so they don't leak into the mic", $controller.muteSpeakers)
                         toggle("AI CLEANUP", "Drop um, uh, filler like and repeats", $controller.aiCleanup)
                         toggle("LIVE WORDS", "Show words in the pill while you talk", $controller.livePreview)
                         toggle("OPEN AT LOGIN", "Start Keet when you log in", $openAtLogin)
@@ -1306,6 +1307,12 @@ enum Snapshot {
         OverlayController.renderPreview(to: directory.appendingPathComponent("pill.png")) { model in
             model.phase = .listening
             model.levels = [0.8, 0.6, 0.9, 0.4, 0.5, 0.3]
+            model.startedAt = Date().addingTimeInterval(-7.4)
+        }
+        OverlayController.renderPreview(to: directory.appendingPathComponent("pill-long.png")) { model in
+            model.phase = .listening
+            model.levels = [0.5, 0.7, 0.4, 0.6, 0.3, 0.2]
+            model.startedAt = Date().addingTimeInterval(-102)
         }
         OverlayController.renderPreview(to: directory.appendingPathComponent("card.png"), height: 220) { model in
             model.cardNote = "No text field selected"

@@ -18,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MicProbe.run(output: URL(fileURLWithPath: out))
             return
         }
+        if let bundles = ProcessInfo.processInfo.environment["KEET_FOCUS_PROBE"] {
+            FocusProbe.run(bundleIDs: bundles.split(separator: ",").map(String.init))
+            return
+        }
         if let out = ProcessInfo.processInfo.environment["KEET_CLEANUP_PROBE"] {
             CleanupProbe.run(output: URL(fileURLWithPath: out))
             return
@@ -33,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Snapshot.render(to: URL(fileURLWithPath: dir), controller: demo)
             return
         }
+        SpeakerMute.restoreAfterCrash()
         controller = AppController()
         statusMenu = StatusMenu(controller: controller)
         mainWindow = MainWindowController(controller: controller)
@@ -64,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Opening Keet again (Finder, Spotlight, Dock) brings up the window.
+    func applicationWillTerminate(_ notification: Notification) {
+        controller?.restoreSpeakers()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         mainWindow.show()
         return true
@@ -228,5 +237,45 @@ enum CleanupProbe {
             try? lines.joined(separator: "\n").write(to: output, atomically: true, encoding: .utf8)
             exit(0)
         }
+    }
+}
+
+/// Runs the text-field check over every element of the given apps (read only: nothing
+/// is focused or typed) and prints, per role, how many would get the paste and how
+/// many the Copy card. Prints roles and counts, never text.
+enum FocusProbe {
+    static func run(bundleIDs: [String]) {
+        let inserter = TextInserter()
+        for bundleID in bundleIDs {
+            guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) else {
+                print("\(bundleID): not running")
+                continue
+            }
+            let root = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(root, 1)
+            var counts: [String: (paste: Int, card: Int)] = [:]
+            var visited = 0
+            func walk(_ element: AXUIElement, _ depth: Int) {
+                visited += 1
+                guard visited <= 8000, depth <= 60 else { return }
+                var role: CFTypeRef?
+                AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+                let key = (role as? String) ?? "-"
+                var entry = counts[key] ?? (0, 0)
+                if case .editable = inserter.classify(element, bundleID: bundleID) { entry.paste += 1 } else { entry.card += 1 }
+                counts[key] = entry
+                var children: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+                   let children = children as? [AXUIElement] {
+                    for child in children { walk(child, depth + 1) }
+                }
+            }
+            walk(root, 0)
+            print("\(bundleID): \(visited) elements")
+            for (role, entry) in counts.sorted(by: { $0.value.paste + $0.value.card > $1.value.paste + $1.value.card }) {
+                print("  \(role): paste \(entry.paste), card \(entry.card)")
+            }
+        }
+        exit(0)
     }
 }

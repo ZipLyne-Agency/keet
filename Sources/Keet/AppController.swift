@@ -65,6 +65,10 @@ final class AppController: ObservableObject {
             }
         }
     }
+    /// Mute the speakers while you talk so what they play doesn't reach the mic.
+    @Published var muteSpeakers: Bool = UserDefaults.standard.object(forKey: "muteSpeakers") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(muteSpeakers, forKey: "muteSpeakers") }
+    }
     /// Tidy each dictation with Apple's on-device model before it's pasted.
     @Published var aiCleanup: Bool = UserDefaults.standard.object(forKey: "aiCleanup") as? Bool ?? true {
         didSet { UserDefaults.standard.set(aiCleanup, forKey: "aiCleanup") }
@@ -84,6 +88,7 @@ final class AppController: ObservableObject {
     private let inserter = TextInserter()
     private let transcriber = Transcriber()
     private let cleanup = Cleanup()
+    private let speakerMute = SpeakerMute()
     private let recorder: AudioRecorder
     private let audioQueue = DispatchQueue(label: "keet.audio", qos: .userInteractive)
     private let tail = TailPolicy()
@@ -400,8 +405,17 @@ final class AppController: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + pillDelay) { [weak self] in
             guard let self, self.session === current else { return }
-            self.overlay.showListening()
+            self.overlay.showListening(since: Date(timeIntervalSinceReferenceDate: current.pressed))
             if self.startSoundOn { self.startSound.play() }
+            // After the chime (105 ms plus output latency) so you still hear it. On the
+            // audio queue, so it can't land after this recording already finished.
+            if self.muteSpeakers {
+                self.audioQueue.asyncAfter(deadline: .now() + (self.startSoundOn ? 0.2 : 0)) { [weak self] in
+                    guard let self, !current.finished else { return }
+                    let result = self.speakerMute.mute()
+                    log.notice("session \(current.id): speakers: \(result, privacy: .public)")
+                }
+            }
         }
         if livePreview { startLivePreview(current) }
     }
@@ -471,11 +485,12 @@ final class AppController: ObservableObject {
         phase = .idle
         liveLevel = 0
         overlay.hide()
-        audioQueue.async { [recorder] in
+        audioQueue.async { [recorder, speakerMute] in
             guard !current.finished else { return }
             current.finished = true
             current.pump?.cancel()
             recorder.stop()
+            speakerMute.restore()
         }
     }
 
@@ -542,6 +557,7 @@ final class AppController: ObservableObject {
         current.finished = true
         current.pump?.cancel()
         recorder.stop()
+        speakerMute.restore()
         recorder.invalidate()
         let name = recorder.activeDeviceName ?? "the microphone"
         DispatchQueue.main.async { [weak self] in
@@ -573,7 +589,12 @@ final class AppController: ObservableObject {
         let released = current.released!
         let tailMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
         let rate = recorder.sampleRate
+        let droppedMs = recorder.droppedMs
         let samples = recorder.stop()
+        speakerMute.restore()
+        if droppedMs > 0 {
+            log.error("session \(current.id): \(droppedMs) ms of audio dropped (the Mac was too busy to deliver it)")
+        }
         let startLatency = current.firstAudio.map { Int(($0 - current.pressed) * 1000) } ?? -1
         let t = current.tracker
         log.notice("session \(current.id): first audio after \(startLatency) ms, tail \(tailMs) ms, \(samples.count) samples, noise \(Int(t.noiseFloorDb)) dB, threshold \(Int(t.speechThresholdDb)) dB, peak \(Int(t.peakDb)) dB")
@@ -626,6 +647,9 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Unmutes the speakers if a dictation had them muted. Called when Keet quits.
+    func restoreSpeakers() { speakerMute.restore() }
+
     /// Cleanup is on and this isn't an insertion test. Whether Apple Intelligence can
     /// run it is checked off the main thread, so key down stays fast.
     private var cleanupWanted: Bool {
@@ -659,7 +683,7 @@ final class AppController: ObservableObject {
             return
         }
         let target = inserter.currentTarget()
-        log.notice("insert target: \(String(describing: target), privacy: .public)")
+        log.notice("insert target: \(String(describing: target), privacy: .public), focus: \(self.inserter.lastFocus, privacy: .public)")
         let app = NSWorkspace.shared.frontmostApplication
         var delivery = Dictation.Delivery.pasted
         switch target {
@@ -667,8 +691,9 @@ final class AppController: ObservableObject {
             if ownsOverlay { overlay.hide() }
             inserter.paste(needsLeadingSpace ? " " + text : text)
         case .unknown:
-            if ownsOverlay { overlay.hide() }
+            // Paste in case it lands, and show the card in case it doesn't.
             inserter.paste(text)
+            if ownsOverlay { overlay.showResult(text, note: "Pasted. Copy it here if it didn't land.") }
         case .notEditable:
             delivery = .card
             if ownsOverlay { overlay.showResult(text) }

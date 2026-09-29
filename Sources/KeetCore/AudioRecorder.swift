@@ -18,8 +18,27 @@ final class SampleStore: @unchecked Sendable {
 
     deinit { storage.deallocate() }
 
+    /// Frames the hardware delivered that never reached us (gaps in sample time).
+    private let dropped = Atomic<Int>(0)
+    /// Next expected sample time. Audio thread only, apart from `reset()`.
+    private var expectedSampleTime = -1.0
+
     /// Only call while the producer is stopped.
-    func reset() { written.store(0, ordering: .releasing) }
+    func reset() {
+        written.store(0, ordering: .releasing)
+        dropped.store(0, ordering: .relaxed)
+        expectedSampleTime = -1
+    }
+
+    /// Audio thread: notes a gap between this buffer and the previous one.
+    func noteSampleTime(_ sampleTime: Double, frames: Int) {
+        if expectedSampleTime >= 0, sampleTime > expectedSampleTime + 1 {
+            dropped.add(Int(sampleTime - expectedSampleTime), ordering: .relaxed)
+        }
+        expectedSampleTime = sampleTime + Double(frames)
+    }
+
+    var droppedFrames: Int { dropped.load(ordering: .relaxed) }
 
     /// Audio thread. `stride` is the channel count of an interleaved buffer; channel 0 is kept.
     func append(_ source: UnsafePointer<Float>, frames: Int, stride: Int) {
@@ -143,8 +162,11 @@ public final class AudioRecorder: @unchecked Sendable {
         let store = SampleStore(capacity: Int(format.sampleRate * Self.maximumSeconds))
         let deaf = Self.dropAudioOnNextBuild
         Self.dropAudioOnNextBuild = false
-        let sink = AVAudioSinkNode { _, frameCount, bufferList in
+        let sink = AVAudioSinkNode { timestamp, frameCount, bufferList in
             if deaf { return noErr }
+            if timestamp.pointee.mFlags.contains(.sampleTimeValid) {
+                store.noteSampleTime(timestamp.pointee.mSampleTime, frames: Int(frameCount))
+            }
             let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
             guard let first = buffers.first, let data = first.mData else { return noErr }
             store.append(
@@ -244,6 +266,13 @@ public final class AudioRecorder: @unchecked Sendable {
     }
 
     public var capturedCount: Int { store?.count ?? 0 }
+
+    /// Audio the hardware captured but that never reached Keet during the current or
+    /// last recording, in milliseconds: dropouts, usually from an overloaded Mac.
+    public var droppedMs: Int {
+        guard let store, sampleRate > 0 else { return 0 }
+        return Int(Double(store.droppedFrames) / sampleRate * 1000)
+    }
 
     /// Within a second of the maximum length; the caller should finish up.
     public var isNearlyFull: Bool {

@@ -269,6 +269,27 @@ matched. Three changes:
 `keet-bench recover` builds an engine that drops every buffer, waits for the timeout,
 rebuilds, and reports when audio came back (about 400 ms, on four runs).
 
+### Muting the speakers while you talk
+
+A desk microphone hears the Mac's own speakers. One morning, transcripts that had been
+accurate turned into things like "cooking into the atmosphere" and "it without we" the
+moment another session booted four iOS simulators whose app had sound output open on
+the speakers. Keet's own pipeline was ruled out: 210 saved test clips transcribed word
+for word as before.
+
+So Keet mutes the default output while you dictate (`SpeakerMute`), the way Wispr Flow's
+"mute audio while dictating" does. It mutes 0.2 s after the pill appears, so the 105 ms
+start chime is still heard, and unmutes the moment capture stops (release, Escape, or a
+failed start), on the same queue as the recording so a short dictation can't leave the
+speakers muted. It leaves Bluetooth output and headphones alone, since they can't leak
+into the mic, and never unmutes speakers you had muted yourself. If Keet quits or crashes
+mid-dictation, it unmutes on quit and again on the next launch. Settings has a switch.
+`keet-bench speakers` mutes and restores once to check a Mac's output.
+
+Keet also counts audio the hardware captured but that never reached it (gaps in the sink
+node's sample time) and logs "N ms of audio dropped" for a dictation that lost some, so a
+Mac too busy to deliver audio shows up in the log instead of as bad transcripts.
+
 ### How loud you need to be
 
 Most wrong words come from quiet audio, not the model. `keet-bench noise` plays the test
@@ -473,12 +494,30 @@ missed while off.
 
 Keet asks Accessibility for the frontmost app's focused element and decides:
 
-- **Text roles** (`AXTextField`, `AXTextArea`, `AXComboBox`, `AXSearchField`), elements
-  whose value is settable, and elements that advertise a caret (`AXSelectedTextRange`)
-  get the text pasted.
-- **Known terminals** always get it pasted.
+- **Text roles** (`AXTextField`, `AXTextArea`, `AXComboBox`, `AXSearchField`) get the
+  text pasted, in any app.
+- **Web content** (Chrome, Safari, and Electron apps such as Orca, Codex, Cursor and
+  Slack, recognized by their `AXDOMClassList` attribute) otherwise gets it only inside
+  an editable region: a rich text box and everything in it point to the box through
+  `AXEditableAncestor`, which nothing else advertises.
+- **Native apps** otherwise get it when the element is editable, its value is settable,
+  or it advertises a caret (`AXSelectedTextRange`). Native terminals (Terminal, iTerm2,
+  Ghostty and others) always get it; their text views use unusual roles.
 - **Everything else** (the desktop, lists, buttons, a web page with nothing selected)
   gets the Copy card.
+- **If Accessibility doesn't answer**, Keet pastes and shows the card too, so the text is
+  never only in a paste that went nowhere.
+
+The web rule exists because Chromium advertises a caret and a settable value on nearly
+every element. Read-only walks of Orca's and Chrome's trees found a caret on 157 of 158
+groups, 84 of 87 buttons and every table cell, so the native rules treated a focused
+button or panel as a text box and pasted into nothing. Orca was also on the terminal
+list, so it always pasted. Now, over every element of those apps, only the real text
+fields pass: Orca's two terminal inputs (xterm.js's helper textarea, an `AXTextField`)
+and its search box, Chrome's two text fields, and in the HotLyne app its one rich text
+box (an `AXGroup` inside an editable region) out of 236 groups. `KEET_FOCUS_PROBE=<bundle
+IDs>` runs this check over an app's whole tree and prints the counts per role. Each
+dictation logs the focused element's role and app (never text).
 
 Only attributes the element *advertises* count. Finder's desktop is an `AXGroup` that
 answers a direct query for `AXSelectedTextRange` with an empty range even though it can't

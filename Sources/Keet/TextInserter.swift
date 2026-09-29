@@ -27,12 +27,16 @@ final class TextInserter {
         kAXColorWellRole, kAXIncrementorRole, kAXDisclosureTriangleRole, "AXStepper", "AXSwitch",
         kAXTabGroupRole, kAXRadioGroupRole, kAXMenuButtonRole,
     ]
-    // Terminals take pasted text even when their accessibility role is unusual.
+    // Native terminals take pasted text even when their accessibility role is unusual.
+    // Web-based ones (Orca, Hyper) aren't listed: their terminal input is a real text
+    // field (xterm.js's helper textarea), so the web rules below find it.
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable",
-        "com.github.wez.wezterm", "org.alacritty", "net.kovidgoyal.kitty", "com.stablyai.orca",
-        "co.zeit.hyper",
+        "com.github.wez.wezterm", "org.alacritty", "net.kovidgoyal.kitty",
     ]
+
+    /// What focus looked like at the last `currentTarget()`, for the log. Never text.
+    private(set) var lastFocus = ""
 
     private var activationObserver: NSObjectProtocol?
 
@@ -61,7 +65,11 @@ final class TextInserter {
     }
 
     func currentTarget() -> Target {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return .unknown }
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            lastFocus = "no frontmost app"
+            return .unknown
+        }
+        let bundleID = app.bundleIdentifier ?? "?"
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.25)
 
@@ -70,30 +78,52 @@ final class TextInserter {
         if err != .success {
             err = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused)
         }
-        if let bundleID = app.bundleIdentifier, Self.terminalBundleIDs.contains(bundleID) {
-            return .editable(needsLeadingSpace: false)
-        }
         guard err == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+            lastFocus = "\(bundleID), no focused element (\(err.rawValue))"
+            if Self.terminalBundleIDs.contains(bundleID) { return .editable(needsLeadingSpace: false) }
             // Finder with nothing selected and similar cases answer "no value": nothing to type into.
             return err == .noValue ? .notEditable : .unknown
         }
-        let element = focused as! AXUIElement
-        let role = stringAttribute(element, kAXRoleAttribute) ?? ""
+        return classify(focused as! AXUIElement, bundleID: bundleID)
+    }
 
-        if Self.textRoles.contains(role) || isEditableWebContent(element) {
+    /// Whether this focused element takes typing.
+    func classify(_ element: AXUIElement, bundleID: String) -> Target {
+        let names = attributeNames(element)
+        let role = stringAttribute(element, kAXRoleAttribute) ?? ""
+        // Chrome, Electron apps (Orca, Codex, Cursor, Slack) and Safari tag their
+        // elements with DOM attributes.
+        let isWeb = names.contains("AXDOMClassList") || names.contains("AXDOMIdentifier") || role == "AXWebArea"
+        lastFocus = "\(bundleID), \(role.isEmpty ? "no role" : role)\(isWeb ? " (web)" : "")"
+
+        if Self.textRoles.contains(role) {
             return .editable(needsLeadingSpace: needsLeadingSpace(element))
+        }
+        if isWeb {
+            // Chromium advertises a caret and a settable value on nearly every element:
+            // in Orca and Chrome, 157 of 158 groups, 84 of 87 buttons, every table cell.
+            // Only a text role (above) or being inside an editable region counts, which
+            // is how a rich text box (contenteditable) shows up.
+            return isInEditableRegion(element, names)
+                ? .editable(needsLeadingSpace: needsLeadingSpace(element)) : .notEditable
+        }
+        if Self.terminalBundleIDs.contains(bundleID) {
+            return .editable(needsLeadingSpace: false)
         }
         if Self.nonTextValueRoles.contains(role) || Self.nonTextRoles.contains(role) {
             return .notEditable
+        }
+        if isInEditableRegion(element, names) {
+            return .editable(needsLeadingSpace: needsLeadingSpace(element))
         }
         var settable = DarwinBoolean(false)
         if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
            settable.boolValue {
             return .editable(needsLeadingSpace: needsLeadingSpace(element))
         }
-        // Anything that can take typing advertises a caret. A generic group without
-        // one (the Finder desktop, a canvas, a sidebar) gets the Copy card.
-        if attributeNames(element).contains(kAXSelectedTextRangeAttribute) {
+        // In native apps, anything that can take typing advertises a caret. A generic
+        // group without one (the Finder desktop, a canvas, a sidebar) gets the Copy card.
+        if names.contains(kAXSelectedTextRangeAttribute) {
             return .editable(needsLeadingSpace: needsLeadingSpace(element))
         }
         return .notEditable
@@ -162,11 +192,18 @@ final class TextInserter {
         return value as? String
     }
 
-    /// contenteditable regions in browsers report generic roles but expose a caret.
-    /// Only advertised attributes count: some apps (Finder) answer caret queries
-    /// with an empty range on elements that can't hold text at all.
-    private func isEditableWebContent(_ element: AXUIElement) -> Bool {
-        let names = attributeNames(element)
+    /// A rich text box (contenteditable) and everything inside it point to the box
+    /// through AXEditableAncestor; elsewhere the attribute isn't advertised. Only
+    /// advertised attributes count: some apps (Finder) answer queries for attributes
+    /// they don't list.
+    private func isInEditableRegion(_ element: AXUIElement, _ names: Set<String>) -> Bool {
+        if names.contains("AXEditableAncestor") {
+            var ancestor: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, "AXEditableAncestor" as CFString, &ancestor) == .success,
+               let ancestor, CFGetTypeID(ancestor) == AXUIElementGetTypeID() {
+                return true
+            }
+        }
         if names.contains("AXEditable") {
             var editable: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editable) == .success,
@@ -174,10 +211,7 @@ final class TextInserter {
                 return true
             }
         }
-        let role = stringAttribute(element, kAXRoleAttribute) ?? ""
-        return role != "AXWebArea"
-            && names.contains(kAXSelectedTextRangeAttribute)
-            && names.contains(kAXInsertionPointLineNumberAttribute)
+        return false
     }
 
     private func attributeNames(_ element: AXUIElement) -> Set<String> {
