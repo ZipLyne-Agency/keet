@@ -592,7 +592,18 @@ final class AppController: ObservableObject {
         let droppedMs = recorder.droppedMs
         let samples = recorder.stop()
         speakerMute.restore()
-        if droppedMs > 0 {
+        let keptMs = Int(Double(samples.count) / max(rate, 1) * 1000)
+        if droppedMs >= 300, droppedMs * 4 >= keptMs + droppedMs {
+            // An engine built while the audio devices were changing can come up
+            // delivering only every other buffer: exactly half the audio, every
+            // dictation, which garbles the words. Load never drops this much, and a
+            // freshly built engine is fine, so build one now for the next press.
+            log.error("session \(current.id): \(droppedMs) ms of audio lost against \(keptMs) ms kept; the microphone engine is broken, rebuilding it")
+            recorder.invalidate()
+            do { try recorder.prepare() } catch {
+                log.error("session \(current.id): rebuilding the microphone failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else if droppedMs > 0 {
             log.error("session \(current.id): \(droppedMs) ms of audio dropped (the Mac was too busy to deliver it)")
         }
         let startLatency = current.firstAudio.map { Int(($0 - current.pressed) * 1000) } ?? -1
