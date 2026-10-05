@@ -305,6 +305,7 @@ private struct HeaderBar: View {
             Spacer(minLength: 12)
             label("STATUS", controller.statusLine.text, controller.statusLine.color)
             label("HOTKEY", controller.hotkeyChoice.shortLabel, Term.cyan)
+            label("HEBREW", controller.hebrewKey?.title ?? "OFF", controller.hebrewKey == nil ? Term.dim : Term.cyan)
             label("MIC", controller.activeMicName.uppercased(), Term.cyan)
                 .frame(maxWidth: 170, alignment: .leading)
             label("DICT", dictionary.words.isEmpty ? "OFF" : "\(dictionary.words.count)", Term.amber)
@@ -404,6 +405,8 @@ private struct SystemPanel: View {
                     KV(key: "WEIGHTS", value: "INT8 ENCODER")
                     KV(key: "BACKEND", value: "APPLE NEURAL ENGINE", color: Term.green)
                     KV(key: "PRIVACY", value: "100% LOCAL", color: Term.green)
+                    KV(key: "HEBREW", value: controller.hebrewKey == nil ? "OFF" : "IVRIT.AI WHISPER · GPU",
+                       color: controller.hebrewState.isReady ? Term.green : Term.dim)
                     KV(key: "DICTIONARY", value: dictionaryText, color: Term.amber)
                     KV(key: "CLEANUP", value: cleanupText, color: cleanupText == "APPLE ON DEVICE" ? Term.green : Term.dim)
                     KV(key: "MIC", value: controller.activeMicName.uppercased())
@@ -627,6 +630,10 @@ private struct FeedCard: View {
                         .font(.termSmall.weight(.semibold))
                         .foregroundStyle(entry.delivery == .card ? Term.amber : Term.red)
                 }
+                if entry.language == .hebrew {
+                    Text("·").font(.termSmall).foregroundStyle(Term.dim)
+                    Text("HEBREW").font(.termSmall.weight(.semibold)).foregroundStyle(Term.cyan)
+                }
                 if entry.rawText != nil {
                     Text("·").font(.termSmall).foregroundStyle(Term.dim)
                     Text("AI CLEANED").font(.termSmall.weight(.semibold)).foregroundStyle(Term.green.opacity(0.8))
@@ -656,7 +663,8 @@ private struct FeedCard: View {
                     .lineSpacing(3)
                     .foregroundStyle(Term.green)
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(entry.text.readsRightToLeft ? .trailing : .leading)
+                    .frame(maxWidth: .infinity, alignment: entry.text.readsRightToLeft ? .trailing : .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let raw = entry.rawText {
@@ -767,6 +775,9 @@ private struct ControlPanel: View {
                 SectionHeader(title: "KEYBOARD SHORTCUTS")
                 VStack(alignment: .leading, spacing: 6) {
                     shortcut("HOLD \(controller.hotkeyChoice.symbol)", "dictate")
+                    if let key = controller.hebrewKey {
+                        shortcut("HOLD \(key.title)", "dictate in hebrew")
+                    }
                     shortcut("ESC", "cancel while holding")
                     shortcut("⌘,", "settings")
                     shortcut("⌘Q", "quit keet")
@@ -932,6 +943,8 @@ private struct SettingsTab: View {
                 VStack(alignment: .leading, spacing: 0) {
                     SectionHeader(title: "DICTATION KEY")
                     keyPicker.padding(.horizontal, 14).padding(.vertical, 12)
+                    SectionHeader(title: "HEBREW KEY")
+                    hebrewKeyPicker.padding(.horizontal, 14).padding(.vertical, 12)
                     SectionHeader(title: "MICROPHONE")
                     microphone.padding(.horizontal, 14).padding(.vertical, 12)
                 }
@@ -981,6 +994,25 @@ private struct SettingsTab: View {
                             Spacer()
                         }
                         .padding(.top, 4)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 12)
+
+                    SectionHeader(title: "HEBREW MODEL")
+                    VStack(alignment: .leading, spacing: 7) {
+                        KV(key: "MODEL", value: "IVRIT.AI WHISPER LARGE V3 TURBO")
+                        KV(key: "MADE BY", value: "IVRIT.AI · FROM OPENAI WHISPER")
+                        KV(key: "RUNS ON", value: "GPU VIA WHISPER.CPP", color: Term.green)
+                        KV(key: "STATUS", value: controller.hebrewStatus,
+                           color: controller.hebrewState == .off ? Term.dim : Term.amber)
+                        if HebrewTranscriber.modelIsPresent {
+                            HStack {
+                                TermButton(title: "SHOW IN FINDER", color: Term.cyan) {
+                                    NSWorkspace.shared.activateFileViewerSelecting([HebrewTranscriber.modelDirectory])
+                                }
+                                Spacer()
+                            }
+                            .padding(.top, 4)
+                        }
                     }
                     .padding(.horizontal, 14).padding(.vertical, 12)
 
@@ -1051,6 +1083,38 @@ private struct SettingsTab: View {
             }
             Text("HOLD TO TALK, LET GO TO INSERT. ESC CANCELS.").font(.termSmall).foregroundStyle(Term.dim)
         }
+    }
+
+    private var hebrewKeyPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 10), spacing: 6) {
+                keyCell("OFF", controller.hebrewKey == nil) { controller.setHebrewKey(nil) }
+                ForEach(FunctionKey.allCases, id: \.self) { key in
+                    keyCell(key.title, controller.hebrewKey == key) { controller.setHebrewKey(key) }
+                }
+            }
+            if controller.hebrewKeyTaken {
+                Text("ANOTHER APP ALREADY USES THAT KEY. PICK ANOTHER.").font(.termSmall).foregroundStyle(Term.red)
+            }
+            Text("HOLD TO TALK IN HEBREW. KEET TAKES THE KEY FOR ITSELF, SO APPS STOP SEEING IT. ON A MAC KEYBOARD, HOLD FN WITH IT UNLESS F1, F2 AND THE REST ARE SET AS STANDARD FUNCTION KEYS. THE FIRST TIME, KEET DOWNLOADS THE HEBREW MODEL (1.6 GB).")
+                .font(.termSmall).foregroundStyle(Term.dim).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+            if controller.hebrewKey != nil {
+                KV(key: "MODEL", value: controller.hebrewStatus, color: controller.hebrewState.isReady ? Term.green : Term.amber)
+            }
+        }
+    }
+
+    private func keyCell(_ title: String, _ selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.termSmall.weight(.bold))
+                .foregroundStyle(selected ? Term.amber : Term.dim)
+                .frame(maxWidth: .infinity).frame(height: 28)
+                .background(selected ? Term.amber.opacity(0.08) : Term.card)
+                .overlay(Rectangle().stroke(selected ? Term.amber : Term.border, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var microphone: some View {
@@ -1189,6 +1253,16 @@ extension HotkeyChoice {
 }
 
 extension AppController {
+    var hebrewStatus: String {
+        switch hebrewState {
+        case .off: "OFF · PICK A HEBREW KEY"
+        case .downloading(let fraction): "DOWNLOADING \(Int(fraction * 100))% OF 1.6 GB"
+        case .loading: "LOADING…"
+        case .ready(let ms): "READY · LOADED IN \(ms)MS"
+        case .failed(let reason): "FAILED · \(reason.uppercased())"
+        }
+    }
+
     var permissionsGranted: Bool {
         AXIsProcessTrusted() && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
@@ -1266,6 +1340,9 @@ enum Snapshot {
                       delivery: .pasted, peakDb: -24, noiseDb: -58, tailMs: 150, transcribeMs: 58,
                       rawText: "Can you like send me the the latest numbers before the meeting this afternoon?",
                       cleanupMs: 296),
+            Dictation(date: ago(5), text: "אפשר לקבוע את הפגישה ליום שלישי בבוקר, ולשלוח לי את הסיכום אחרי זה?",
+                      appName: "WhatsApp", bundleID: "net.whatsapp.WhatsApp", audioSeconds: 4.6, latencyMs: 263,
+                      delivery: .pasted, peakDb: -23, noiseDb: -58, tailMs: 70, transcribeMs: 241, language: .hebrew),
             Dictation(date: ago(9), text: "Let's move the standup to 10:30 and skip the retro this week.",
                       appName: "Messages", bundleID: "com.apple.MobileSMS", audioSeconds: 2.9, latencyMs: 168,
                       delivery: .pasted, peakDb: -22, noiseDb: -57, tailMs: 110, transcribeMs: 52),
@@ -1317,6 +1394,16 @@ enum Snapshot {
         OverlayController.renderPreview(to: directory.appendingPathComponent("card.png"), height: 220) { model in
             model.cardNote = "No text field selected"
             model.phase = .result("Book a table for four people at seven, and ask them for the corner by the window.")
+        }
+        OverlayController.renderPreview(to: directory.appendingPathComponent("pill-hebrew.png")) { model in
+            model.phase = .listening
+            model.tag = "HE"
+            model.levels = [0.7, 0.5, 0.8, 0.4, 0.6, 0.3]
+            model.startedAt = Date().addingTimeInterval(-4.2)
+        }
+        OverlayController.renderPreview(to: directory.appendingPathComponent("card-hebrew.png"), height: 220) { model in
+            model.cardNote = "No text field selected"
+            model.phase = .result("אפשר לקבוע את הפגישה ליום שלישי בבוקר, ולשלוח לי את הסיכום אחרי זה?")
         }
         OverlayController.renderPreview(to: directory.appendingPathComponent("pill-live.png")) { model in
             model.phase = .listening

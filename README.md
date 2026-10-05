@@ -26,6 +26,12 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
   half a second. It needs Apple Intelligence (macOS 26 or later).
   See [how](docs/REMAKE.md#ai-cleanup).
 - **Your choice of microphone**, with an input volume slider and a live level test.
+- **Hebrew on its own key.** Pick a function key (F12, say) in Settings and hold it to
+  dictate in Hebrew. Keet runs ivrit.ai's Hebrew Whisper Turbo on the Mac's GPU through
+  whisper.cpp; on [ivrit.ai's leaderboard](https://huggingface.co/spaces/ivrit-ai/hebrew-transcription-leaderboard)
+  it is level with the best cloud service. A few seconds of Hebrew take about 0.2 to
+  0.35 s. The model (1.6 GB) downloads the first time you pick a key.
+  See [how](docs/REMAKE.md#hebrew).
 - **Speakers go quiet while you talk.** Whatever the Mac is playing (a video, music, an
   app in a simulator) is muted after the start chime and back the moment you stop, so it
   can't leak into the mic. Headphones and Bluetooth are left alone.
@@ -34,7 +40,7 @@ few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within 
 
 - A Mac with Apple Silicon (M1 or later) on macOS 15 Sequoia or later
 - Xcode 26 or later to build it
-- About 615 MB of disk for the speech model
+- About 615 MB of disk for the speech model, and 1.6 GB more if you turn on Hebrew
 - For AI cleanup: macOS 26 or later with Apple Intelligence turned on (optional)
 
 Built and measured on a MacBook Pro with M5 Max running macOS 27 and Xcode 27.
@@ -45,7 +51,8 @@ Built and measured on a MacBook Pro with M5 Max running macOS 27 and Xcode 27.
 git clone https://github.com/ZipLyne-Agency/keet.git
 cd keet
 scripts/fetch-model.sh           # optional: Keet also downloads the model on first launch
-                                 # add --dictionary to fetch the Dictionary's model too
+                                 # add --dictionary to fetch the Dictionary's model too,
+                                 # --hebrew for the Hebrew model
 scripts/build-app.sh --install   # builds, signs, copies to /Applications
 open /Applications/Keet.app
 ```
@@ -63,6 +70,7 @@ signs ad hoc, and macOS asks again after every rebuild.
 | Action | What happens |
 |---|---|
 | Hold Left Option and talk | The pill appears, follows your voice, and counts how long you've talked |
+| Hold your Hebrew key and talk | The same, in Hebrew (set the key under Settings > Hebrew key; on a Mac keyboard hold Fn with it) |
 | Let go | The text is pasted where your cursor is |
 | Escape while holding | Cancels; after 2 seconds of talking, the text is kept in History instead of pasted |
 | Option + another key, or a click, in the first 0.6 s | Treated as a normal shortcut, never a dictation |

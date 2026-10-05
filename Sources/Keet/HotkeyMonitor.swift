@@ -61,6 +61,78 @@ enum HotkeyChoice: Int, CaseIterable {
     }
 }
 
+/// The function key held to dictate in Hebrew. Raw values are macOS virtual key codes.
+enum FunctionKey: Int, CaseIterable {
+    case f1 = 122, f2 = 120, f3 = 99, f4 = 118, f5 = 96, f6 = 97, f7 = 98, f8 = 100, f9 = 101, f10 = 109
+    case f11 = 103, f12 = 111, f13 = 105, f14 = 107, f15 = 113, f16 = 106, f17 = 64, f18 = 79, f19 = 80
+
+    var title: String { "F\(Self.allCases.firstIndex(of: self)! + 1)" }
+}
+
+/// Holds a bare function key as a second dictation key, through a registered hot key.
+/// Unlike the listen-only tap, a hot key takes the key for itself: the app you're in
+/// never sees the F12 meant for Keet (in VS Code it would jump to a definition), and
+/// holding it doesn't repeat into the app. macOS sends one press and one release
+/// however long it's held.
+final class FunctionKeyHotkey {
+    private static let signature: OSType = 0x4B45_4554  // "KEET"
+
+    var onPress: () -> Void = {}
+    var onRelease: () -> Void = {}
+    private(set) var key: FunctionKey?
+    private var registration: EventHotKeyRef?
+    private var handler: EventHandlerRef?
+    private var held = false
+
+    init() {
+        var types = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+        ]
+        InstallEventHandler(
+            GetEventDispatcherTarget(),
+            { _, event, refcon in
+                guard let event, let refcon else { return OSStatus(eventNotHandledErr) }
+                var id = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                  nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
+                guard id.signature == FunctionKeyHotkey.signature else { return OSStatus(eventNotHandledErr) }
+                let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+                Unmanaged<FunctionKeyHotkey>.fromOpaque(refcon).takeUnretainedValue().handle(pressed: pressed)
+                return noErr
+            },
+            types.count, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
+    }
+
+    /// Takes `key` for Keet, or gives the current one back with nil. Returns false when
+    /// macOS refuses it (another app already registered it).
+    @discardableResult
+    func register(_ key: FunctionKey?) -> Bool {
+        if let registration { UnregisterEventHotKey(registration) }
+        registration = nil
+        held = false
+        self.key = key
+        guard let key else { return true }
+        let status = RegisterEventHotKey(
+            UInt32(key.rawValue), 0, EventHotKeyID(signature: Self.signature, id: 1), GetEventDispatcherTarget(), 0,
+            &registration)
+        if status != noErr { self.key = nil }
+        return status == noErr
+    }
+
+    private func handle(pressed: Bool) {
+        if pressed {
+            // As with the main key: never dictate into a password field.
+            guard !held, !IsSecureEventInputEnabled() else { return }
+            held = true
+            onPress()
+        } else if held {
+            held = false
+            onRelease()
+        }
+    }
+}
+
 /// Watches the keyboard with a listen-only event tap. It never blocks or alters
 /// input, so a slow or stuck Keet can't interfere with typing.
 final class HotkeyMonitor {
@@ -83,6 +155,12 @@ final class HotkeyMonitor {
     /// Any key or click while not holding: you've moved on, so a dictation still
     /// listening for its last word can stop.
     var onActivity: () -> Void = {}
+    /// The Hebrew key. FunctionKeyHotkey handles it; this tap still sees it, so it's
+    /// skipped here.
+    var functionKeyCode: Int?
+    /// The Hebrew key is held: Escape cancels that dictation, other keys, clicks and the
+    /// main key do nothing.
+    var functionKeyHeld = false
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -143,8 +221,9 @@ final class HotkeyMonitor {
             if code == choice.rawValue {
                 let down = choice.isDown(flags)
                 if down, !held {
-                    // Only a bare press dictates; with other modifiers it's a shortcut.
-                    guard !choice.othersHeld(flags), !IsSecureEventInputEnabled() else { return }
+                    // Only a bare press dictates; with other modifiers it's a shortcut. While
+                    // the Hebrew key is held, the main key is ignored altogether.
+                    guard !choice.othersHeld(flags), !IsSecureEventInputEnabled(), !functionKeyHeld else { return }
                     held = true
                     cancelled = false
                     pressedAt = CFAbsoluteTimeGetCurrent()
@@ -158,8 +237,16 @@ final class HotkeyMonitor {
             }
 
         case .keyDown:
+            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if code == functionKeyCode { return }
+            // During a Hebrew dictation the main key's state doesn't matter: Escape
+            // cancels it, and nothing else does.
+            if functionKeyHeld {
+                if code == kVK_Escape { onCancel(.escape) }
+                return
+            }
             if held {
-                if event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Escape) {
+                if code == kVK_Escape {
                     cancel(.escape)
                 } else if inShortcutWindow {
                     // Option+arrow, Option+letter: a shortcut, not dictation.
@@ -171,10 +258,11 @@ final class HotkeyMonitor {
                 if event.getIntegerValueField(.eventSourceUserData) != TextInserter.syntheticEventTag {
                     onActivity()
                 }
-                if event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Escape) { onEscape() }
+                if code == kVK_Escape { onEscape() }
             }
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if functionKeyHeld { return }
             if held {
                 if inShortcutWindow { cancel(.shortcut) }
             } else {

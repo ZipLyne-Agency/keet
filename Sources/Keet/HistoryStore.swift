@@ -1,6 +1,12 @@
 import AppKit
 import Foundation
 
+/// The language a dictation was spoken in, which also picks the speech model.
+enum DictationLanguage: String, Codable {
+    case english = "en"
+    case hebrew = "he"
+}
+
 /// One finished dictation.
 struct Dictation: Codable, Identifiable, Equatable {
     enum Delivery: String, Codable {
@@ -34,6 +40,8 @@ struct Dictation: Codable, Identifiable, Equatable {
     var rawText: String?
     /// Time the AI cleanup took, when it ran.
     var cleanupMs: Int?
+    /// Older entries don't have it; they were all English.
+    var language: DictationLanguage?
 
     var words: Int { text.split(whereSeparator: \.isWhitespace).count }
 }

@@ -29,7 +29,31 @@ final class AppController: ObservableObject {
         case failed(String)
     }
 
+    enum HebrewState: Equatable {
+        /// No Hebrew key is set, so the model isn't loaded.
+        case off
+        /// The first time a key is set: 1.6 GB, fraction done.
+        case downloading(Double)
+        case loading
+        case ready(loadMs: Int)
+        case failed(String)
+
+        var isReady: Bool { if case .ready = self { return true } else { return false } }
+    }
+
     @Published private(set) var modelState: ModelState = .loading
+    /// The function key held for Hebrew; nil when Hebrew is off.
+    @Published private(set) var hebrewKey: FunctionKey?
+    @Published private(set) var hebrewState: HebrewState = .off
+    /// macOS refused the Hebrew key because another app already registered it.
+    @Published private(set) var hebrewKeyTaken = false
+    let functionHotkey = FunctionKeyHotkey()
+    private let hebrew = HebrewTranscriber()
+    private var hebrewTask: Task<Void, Never>?
+    /// Bumped whenever Hebrew is switched, so a stale download or load can't report in.
+    private var hebrewGeneration = 0
+    /// The key being held right now. While one dictation key is down the other is ignored.
+    private var heldLanguage: DictationLanguage?
     @Published private(set) var dictionaryState: DictionaryState = .empty
     private var dictionaryTask: Task<Void, Never>?
     @Published private(set) var phase: Phase = .idle
@@ -109,6 +133,7 @@ final class AppController: ObservableObject {
     /// Audio-side state for the recording in progress. Touched only on `audioQueue`.
     private final class Session: @unchecked Sendable {
         let id: Int
+        let language: DictationLanguage
         let pressed = CFAbsoluteTimeGetCurrent()
         var released: CFAbsoluteTime?
         var tracker: EnergyTracker
@@ -123,8 +148,9 @@ final class AppController: ObservableObject {
         /// Escape on a long dictation: transcribe and keep it, but don't paste.
         var keepOnly = false
 
-        init(id: Int, sampleRate: Double) {
+        init(id: Int, language: DictationLanguage, sampleRate: Double) {
             self.id = id
+            self.language = language
             tracker = EnergyTracker(sampleRate: sampleRate)
         }
     }
@@ -139,12 +165,16 @@ final class AppController: ObservableObject {
         let saved = HotkeyChoice(rawValue: UserDefaults.standard.integer(forKey: "hotkey")) ?? .leftOption
         hotkeyChoice = saved
         hotkey = HotkeyMonitor(choice: saved)
+        hebrewKey = FunctionKey(rawValue: UserDefaults.standard.integer(forKey: "hebrewKey"))
+        hotkey.functionKeyCode = hebrewKey?.rawValue
         selectedMicUID = UserDefaults.standard.string(forKey: "micUID")
         recorder.preferredDeviceUID = selectedMicUID
         recorder.voiceProcessing = UserDefaults.standard.object(forKey: "noiseReduction") as? Bool ?? false
 
-        hotkey.onPress = { [weak self] in self?.keyPressed() }
-        hotkey.onRelease = { [weak self] in self?.keyReleased() }
+        hotkey.onPress = { [weak self] in self?.keyPressed(.english) }
+        hotkey.onRelease = { [weak self] in self?.keyReleased(.english) }
+        functionHotkey.onPress = { [weak self] in self?.keyPressed(.hebrew) }
+        functionHotkey.onRelease = { [weak self] in self?.keyReleased(.hebrew) }
         hotkey.onCancel = { [weak self] reason in self?.cancel(reason) }
         hotkey.onEscape = { [weak self] in
             guard let self, self.overlay.isShowingResult else { return }
@@ -177,6 +207,8 @@ final class AppController: ObservableObject {
 
     func start() {
         audioQueue.async { [recorder] in try? recorder.prepare() }
+        // A registered hot key needs no permission, so it's taken right away.
+        if let key = hebrewKey { hebrewKeyTaken = !functionHotkey.register(key) }
         // UI tests can run without touching the model.
         guard ProcessInfo.processInfo.environment["KEET_SKIP_MODEL"] == nil else { return }
         Task { await loadModel() }
@@ -196,6 +228,9 @@ final class AppController: ObservableObject {
             log.error("model load failed: \(error.localizedDescription, privacy: .public)")
             modelState = .failed(error.localizedDescription)
         }
+        // After English, which is the main key and the smaller model; Hebrew doesn't
+        // depend on it loading.
+        prepareHebrew()
     }
 
     // MARK: - Dictionary
@@ -225,6 +260,86 @@ final class AppController: ObservableObject {
                 self.dictionaryState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - Hebrew
+
+    /// Downloads (the first time) and loads the Hebrew model while a Hebrew key is set.
+    /// Also the retry after a failure.
+    func prepareHebrew() {
+        guard hebrewKey != nil, hebrewTask == nil, !hebrewState.isReady,
+              ProcessInfo.processInfo.environment["KEET_SKIP_MODEL"] == nil else { return }
+        hebrewGeneration += 1
+        let generation = hebrewGeneration
+        hebrewTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.hebrewGeneration == generation { self.hebrewTask = nil } }
+            do {
+                self.hebrewState = .loading
+                let checked = CFAbsoluteTimeGetCurrent()
+                let verified = await Task.detached(priority: .utility) { HebrewTranscriber.verifyModel() }.value
+                log.notice("hebrew model check: \(verified ? "ok" : "missing", privacy: .public) in \(Int((CFAbsoluteTimeGetCurrent() - checked) * 1000)) ms")
+                guard self.hebrewGeneration == generation else { return }
+                if !verified {
+                    self.hebrewState = .downloading(0)
+                    log.notice("downloading the hebrew model")
+                    try await self.hebrew.download { [weak self] fraction in
+                        Task { @MainActor in
+                            guard let self, self.hebrewGeneration == generation else { return }
+                            self.hebrewState = .downloading(fraction)
+                        }
+                    }
+                }
+                guard self.hebrewGeneration == generation else { return }
+                self.hebrewState = .loading
+                let t0 = CFAbsoluteTimeGetCurrent()
+                try await self.hebrew.load()
+                try await self.hebrew.warmUp()
+                guard self.hebrewGeneration == generation else { return }
+                let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                log.notice("hebrew model ready in \(ms) ms")
+                self.hebrewState = .ready(loadMs: ms)
+            } catch {
+                guard self.hebrewGeneration == generation else { return }
+                log.error("hebrew model failed: \(error.localizedDescription, privacy: .public)")
+                self.hebrewState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Sets the key held for Hebrew, or switches Hebrew off (and frees its memory) with nil.
+    func setHebrewKey(_ key: FunctionKey?) {
+        cancel(.shortcut)
+        hebrewKey = key
+        hotkey.functionKeyCode = key?.rawValue
+        UserDefaults.standard.set(key?.rawValue ?? 0, forKey: "hebrewKey")
+        hebrewKeyTaken = !functionHotkey.register(key)
+        if key == nil {
+            hebrewGeneration += 1
+            hebrewTask?.cancel()
+            hebrewTask = nil
+            hebrew.unload()
+            hebrewState = .off
+        } else if modelState != .loading {
+            prepareHebrew()
+        }
+    }
+
+    /// A Hebrew press before the model is ready: say why instead of only beeping.
+    private func explainHebrewNotReady() {
+        let message: String
+        switch hebrewState {
+        case .downloading(let fraction):
+            message = "Downloading the Hebrew model: \(Int(fraction * 100))% of 1.6 GB."
+        case .loading, .off:
+            message = "The Hebrew model is loading. Try again in a moment."
+        case .failed(let reason):
+            message = "The Hebrew model didn't load: \(reason) Trying again."
+            prepareHebrew()
+        case .ready:
+            return
+        }
+        overlay.showResult(message, note: "Hebrew isn't ready yet")
     }
 
     // MARK: - Settings
@@ -362,27 +477,36 @@ final class AppController: ObservableObject {
 
     // MARK: - Dictation lifecycle
 
-    private func keyPressed() {
-        guard Self.testing || (modelState.isReady && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
+    private func keyPressed(_ language: DictationLanguage) {
+        // One dictation key at a time: the other is ignored until this one is let go.
+        if let held = heldLanguage, held != language { return }
+        let modelReady = language == .hebrew ? hebrewState.isReady : modelState.isReady
+        guard Self.testing || (modelReady && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
         else {
-            log.notice("key down ignored: model \(String(describing: self.modelState), privacy: .public)")
+            let state = language == .hebrew ? String(describing: hebrewState) : String(describing: modelState)
+            log.notice("key down ignored: \(language.rawValue, privacy: .public) model \(state, privacy: .public)")
             NSSound.beep()
+            if language == .hebrew, !modelReady { explainHebrewNotReady() }
             return
         }
+        heldLanguage = language
+        hotkey.functionKeyHeld = language == .hebrew
         if isTestingMic { stopMicTest() }
         if overlay.isShowingResult { overlay.hide() }
         inserter.prime()
-        if cleanupWanted { Task.detached(priority: .userInitiated) { [cleanup] in cleanup.prepare() } }
+        if cleanupWanted, language == .english {
+            Task.detached(priority: .userInitiated) { [cleanup] in cleanup.prepare() }
+        }
 
         // A new press during the previous dictation's tail finishes that one now.
         if let previous = session {
             audioQueue.async { [weak self] in self?.finish(previous) }
         }
         sessionCounter += 1
-        let current = Session(id: sessionCounter, sampleRate: recorder.sampleRate)
+        let current = Session(id: sessionCounter, language: language, sampleRate: recorder.sampleRate)
         session = current
         phase = .listening
-        log.notice("session \(current.id): key down")
+        log.notice("session \(current.id): \(language.rawValue, privacy: .public) key down")
 
         audioQueue.async { [weak self, recorder] in
             guard let self else { return }
@@ -405,7 +529,8 @@ final class AppController: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + pillDelay) { [weak self] in
             guard let self, self.session === current else { return }
-            self.overlay.showListening(since: Date(timeIntervalSinceReferenceDate: current.pressed))
+            self.overlay.showListening(
+                since: Date(timeIntervalSinceReferenceDate: current.pressed), tag: language == .hebrew ? "HE" : nil)
             if self.startSoundOn { self.startSound.play() }
             // After the chime (105 ms plus output latency) so you still hear it. On the
             // audio queue, so it can't land after this recording already finished.
@@ -417,7 +542,9 @@ final class AppController: ObservableObject {
                 }
             }
         }
-        if livePreview { startLivePreview(current) }
+        // Live words re-run the model several times a second: cheap for Parakeet, but
+        // Whisper would compete with the final pass on the GPU.
+        if livePreview, language == .english { startLivePreview(current) }
     }
 
     /// While the key is held, re-transcribes the last 14 seconds a few times a second
@@ -442,7 +569,13 @@ final class AppController: ObservableObject {
         }
     }
 
-    private func keyReleased() {
+    /// `language` is the key that came up; nil (the microphone went away) ends whatever
+    /// is held.
+    private func keyReleased(_ language: DictationLanguage? = nil) {
+        // Not the key that started this dictation, or the dictation was already cancelled.
+        if let language, heldLanguage != language { return }
+        heldLanguage = nil
+        hotkey.functionKeyHeld = false
         guard let current = session else { return }
         let held = CFAbsoluteTimeGetCurrent() - current.pressed
         log.notice("session \(current.id): key up after \(Int(held * 1000)) ms")
@@ -468,6 +601,8 @@ final class AppController: ObservableObject {
     }
 
     private func cancel(_ reason: HotkeyMonitor.CancelReason = .shortcut) {
+        heldLanguage = nil
+        hotkey.functionKeyHeld = false
         guard let current = session else { return }
         liveTask?.cancel()
         if reason == .escape, CFAbsoluteTimeGetCurrent() - current.pressed >= 2 {
@@ -635,6 +770,8 @@ final class AppController: ObservableObject {
                 let pcm = try self.transcriber.resample(samples, from: rate)
                 if let fake = ProcessInfo.processInfo.environment["KEET_FAKE_TEXT"] {
                     text = fake  // insertion tests without the model
+                } else if current.language == .hebrew {
+                    text = try await self.hebrew.transcribe(pcm)
                 } else {
                     text = try await self.transcriber.transcribe(pcm)
                 }
@@ -643,14 +780,16 @@ final class AppController: ObservableObject {
             }
             let transcribeMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             var cleaned: Cleanup.Result?
-            if self.cleanupWanted, !text.isEmpty {
+            // The cleanup and the Dictionary are built for English.
+            if self.cleanupWanted, current.language == .english, !text.isEmpty {
                 let result = await self.cleanup.clean(text, protecting: self.dictionary.words.map(\.text))
                 log.notice("session \(current.id): cleanup \(result.ms) ms, \(result.note, privacy: .public)")
                 cleaned = result
             }
             let latencyMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
             let keepOnly = await self.keepOnly(current)
-            self.deliver(cleaned?.text ?? text, raw: cleaned?.changed == true ? text : nil, ownsOverlay: isLatest,
+            self.deliver(cleaned?.text ?? text, raw: cleaned?.changed == true ? text : nil, language: current.language,
+                         ownsOverlay: isLatest,
                          audioSeconds: Double(samples.count) / max(rate, 1),
                          latencyMs: latencyMs, peakDb: peakDb, noiseDb: noiseDb,
                          timing: (tailMs, transcribeMs, cleaned?.ms), keepOnly: keepOnly)
@@ -674,8 +813,8 @@ final class AppController: ObservableObject {
     }
 
     private func deliver(
-        _ text: String, raw: String?, ownsOverlay: Bool, audioSeconds: Double, latencyMs: Int, peakDb: Float,
-        noiseDb: Float, timing: (tail: Int, model: Int, cleanup: Int?), keepOnly: Bool
+        _ text: String, raw: String?, language: DictationLanguage, ownsOverlay: Bool, audioSeconds: Double,
+        latencyMs: Int, peakDb: Float, noiseDb: Float, timing: (tail: Int, model: Int, cleanup: Int?), keepOnly: Bool
     ) {
         // A newer dictation may already be showing its pill; leave that alone.
         let ownsOverlay = ownsOverlay && session == nil
@@ -690,7 +829,8 @@ final class AppController: ObservableObject {
             history.add(Dictation(
                 date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
                 audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: .cancelled, peakDb: peakDb, noiseDb: noiseDb,
-                tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup))
+                tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup,
+                language: language))
             return
         }
         let target = inserter.currentTarget()
@@ -712,6 +852,7 @@ final class AppController: ObservableObject {
         history.add(Dictation(
             date: Date(), text: text, appName: app?.localizedName, bundleID: app?.bundleIdentifier,
             audioSeconds: audioSeconds, latencyMs: latencyMs, delivery: delivery, peakDb: peakDb, noiseDb: noiseDb,
-            tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup))
+            tailMs: timing.tail, transcribeMs: timing.model, rawText: raw, cleanupMs: timing.cleanup,
+            language: language))
     }
 }

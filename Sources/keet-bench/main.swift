@@ -15,6 +15,9 @@ import KeetCore
 // keet-bench cleanup <history.json|lines.txt> [dictionary.json]
 //                                           run the AI cleanup over real transcripts: what it
 //                                           changed, what it refused, and how long it took
+// keet-bench hebrew <dir|file>...           the Hebrew model: load, warm-up, per-file latency
+//                                           and text; a dir with picks.tsv (file, seconds,
+//                                           reference) also gets a word error rate
 
 func now() -> Double { CFAbsoluteTimeGetCurrent() }
 func ms(_ t: Double) -> String { String(format: "%.0f ms", t * 1000) }
@@ -72,6 +75,11 @@ if command == "recover" {
 
 if command == "cleanup" {
     try await runCleanup(Array(args.dropFirst()))
+    exit(0)
+}
+
+if command == "hebrew" {
+    try await runHebrew(Array(args.dropFirst()))
     exit(0)
 }
 
@@ -318,4 +326,72 @@ func runCleanup(_ args: [String]) async throws {
     if !sorted.isEmpty {
         print("model calls: \(sorted.count), median \(sorted[sorted.count / 2]) ms, p90 \(sorted[sorted.count * 9 / 10]) ms, max \(sorted.last!) ms")
     }
+}
+
+func runHebrew(_ args: [String]) async throws {
+    let hebrew = HebrewTranscriber()
+    var t0 = now()
+    let verified = HebrewTranscriber.verifyModel()
+    print("checksum: \(verified ? "ok" : "missing or wrong"), \(ms(now() - t0))")
+    if !verified {
+        print("downloading the Hebrew model (1.6 GB)")
+        try await hebrew.download { print(String(format: "  %.0f%%", $0 * 100)) }
+    }
+    t0 = now()
+    try await hebrew.load()
+    print("load: \(ms(now() - t0))")
+    t0 = now()
+    try await hebrew.warmUp()
+    print("warm-up (first prediction): \(ms(now() - t0))")
+
+    // (file, reference) pairs; the reference is empty when there's none.
+    var clips: [(URL, String)] = []
+    for path in args {
+        let url = URL(fileURLWithPath: path)
+        let picks = url.appendingPathComponent("picks.tsv")
+        if let table = try? String(contentsOf: picks, encoding: .utf8) {
+            for line in table.split(separator: "\n") {
+                let fields = line.split(separator: "\t", maxSplits: 2).map(String.init)
+                if fields.count == 3 { clips.append((url.appendingPathComponent(fields[0]), fields[2])) }
+            }
+        } else {
+            clips.append((url, ""))
+        }
+    }
+
+    // Words without punctuation, so "הוגן." matches "הוגן".
+    func words(_ s: String) -> [String] {
+        s.components(separatedBy: CharacterSet.letters.union(.decimalDigits).inverted).filter { !$0.isEmpty }
+    }
+    func distance(_ a: [String], _ b: [String]) -> Int {
+        var row = Array(0...b.count)
+        for i in a.indices {
+            var next = [i + 1]
+            for j in b.indices { next.append(min(row[j + 1] + 1, next[j] + 1, row[j] + (a[i] == b[j] ? 0 : 1))) }
+            row = next
+        }
+        return row[b.count]
+    }
+
+    let converter = Transcriber()
+    var errors = 0, total = 0
+    var latencies: [Int] = []
+    for (url, reference) in clips {
+        let samples = try converter.loadAudioFile(url)
+        let start = now()
+        let text = try await hebrew.transcribe(samples)
+        let elapsed = Int((now() - start) * 1000)
+        latencies.append(elapsed)
+        var line = String(format: "[%.1fs audio, %d ms] %@", Double(samples.count) / 16_000, elapsed, text)
+        if !reference.isEmpty {
+            let ref = words(reference), errorsHere = distance(ref, words(text))
+            errors += errorsHere
+            total += ref.count
+            line += String(format: "\n   wer %.2f  ref: %@", Double(errorsHere) / Double(max(ref.count, 1)), reference)
+        }
+        print(line)
+    }
+    let sorted = latencies.sorted()
+    if !sorted.isEmpty { print("median \(sorted[sorted.count / 2]) ms, max \(sorted.last!) ms over \(sorted.count) clips") }
+    if total > 0 { print(String(format: "word error rate %.3f over %d words", Double(errors) / Double(total), total)) }
 }

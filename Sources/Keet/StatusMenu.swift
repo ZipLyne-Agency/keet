@@ -42,6 +42,14 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .failed: status = "Speech model failed to load"
         }
         menu.addItem(disabled(status))
+        if let key = controller.hebrewKey {
+            switch controller.hebrewState {
+            case .ready: menu.addItem(disabled("Hold \(key.title) for Hebrew"))
+            case .downloading(let fraction): menu.addItem(disabled("Downloading Hebrew model… \(Int(fraction * 100))%"))
+            case .loading, .off: menu.addItem(disabled("Loading Hebrew model…"))
+            case .failed: menu.addItem(disabled("Hebrew model failed to load"))
+            }
+        }
         if case .failed(let reason) = controller.modelState {
             menu.addItem(disabled(reason))
             menu.addItem(action("Try Again", #selector(retryModel)))
@@ -95,6 +103,22 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
         shortcut.submenu = shortcutMenu
         menu.addItem(shortcut)
+
+        let hebrewKey = NSMenuItem(title: "Hebrew Key", action: nil, keyEquivalent: "")
+        let hebrewMenu = NSMenu()
+        let off = action("Off", #selector(pickHebrewKey(_:)))
+        off.tag = 0
+        off.state = controller.hebrewKey == nil ? .on : .off
+        hebrewMenu.addItem(off)
+        hebrewMenu.addItem(.separator())
+        for key in FunctionKey.allCases {
+            let entry = action(key.title, #selector(pickHebrewKey(_:)))
+            entry.tag = key.rawValue
+            entry.state = key == controller.hebrewKey ? .on : .off
+            hebrewMenu.addItem(entry)
+        }
+        hebrewKey.submenu = hebrewMenu
+        menu.addItem(hebrewKey)
 
         let mic = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         let micMenu = NSMenu()
@@ -155,6 +179,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func pickHotkey(_ sender: NSMenuItem) {
         if let choice = HotkeyChoice(rawValue: sender.tag) { controller.setHotkey(choice) }
+    }
+
+    @objc private func pickHebrewKey(_ sender: NSMenuItem) {
+        controller.setHebrewKey(FunctionKey(rawValue: sender.tag))
     }
 
     @objc private func toggleLogin() {

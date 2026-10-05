@@ -27,6 +27,8 @@ final class OverlayModel: ObservableObject {
     @Published var startedAt = Date()
     /// When the key came up; the timer stops there.
     @Published var stoppedAt: Date?
+    /// The language being dictated, when it isn't English ("HE").
+    @Published var tag: String?
 
     func push(level: CGFloat) {
         var next = levels
@@ -145,6 +147,9 @@ private struct Pill: View {
     private var compact: some View {
         HStack(spacing: 9) {
             RecordingDot(active: model.phase == .listening)
+            if let tag = model.tag {
+                Text(tag).font(.mono(10, .bold)).foregroundStyle(Term.cyan)
+            }
             indicator
             Elapsed(start: model.startedAt, end: model.stoppedAt)
         }
@@ -252,7 +257,8 @@ private struct ResultCard: View {
                 .font(.mono(13))
                 .lineSpacing(3)
                 .foregroundStyle(Term.green)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(text.readsRightToLeft ? .trailing : .leading)
+                .frame(maxWidth: .infinity, alignment: text.readsRightToLeft ? .trailing : .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -282,6 +288,15 @@ private struct OverlayRoot: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.bottom, OverlayController.margin)
         .animation(.spring(response: 0.26, dampingFraction: 0.82), value: model.phase)
+    }
+}
+
+extension String {
+    /// The first letter is Hebrew or Arabic, so the text reads right to left.
+    var readsRightToLeft: Bool {
+        guard let first = unicodeScalars.first(where: { CharacterSet.letters.contains($0) }) else { return false }
+        return (0x0590...0x08FF).contains(first.value) || (0xFB1D...0xFDFF).contains(first.value)
+            || (0xFE70...0xFEFF).contains(first.value)
     }
 }
 
@@ -348,10 +363,11 @@ final class OverlayController {
         return false
     }
 
-    func showListening(since start: Date = Date()) {
+    func showListening(since start: Date = Date(), tag: String? = nil) {
         dismissTimer?.invalidate()
         model.resetLevels()
         model.liveText = ""
+        model.tag = tag
         model.startedAt = start
         model.stoppedAt = nil
         present(size: Self.listeningSize, interactive: false)

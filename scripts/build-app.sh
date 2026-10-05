@@ -17,10 +17,18 @@ else
   [[ -z "$IDENTITY" ]] && IDENTITY="$(awk -F'"' '/Apple Development/ {print $2; exit}' <<< "$IDENTITIES")"
   [[ -z "$IDENTITY" ]] && IDENTITY="-"
 fi
+SIGN=(--sign "$IDENTITY")
 if [[ "$IDENTITY" == "-" ]]; then
   echo "signing ad hoc: macOS will ask for Microphone and Accessibility again after each rebuild"
 else
   echo "signing as: $IDENTITY"
+  # Use the login keychain when the identity is there. A CI runner on the same Mac can
+  # put its own locked keychain first in the search list, and codesign then fails with
+  # errSecInternalComponent.
+  LOGIN="$HOME/Library/Keychains/login.keychain-db"
+  if security find-identity -v -p codesigning "$LOGIN" 2>/dev/null | grep -qF "$IDENTITY"; then
+    SIGN+=(--keychain "$LOGIN")
+  fi
 fi
 
 swift build -c release --product Keet
@@ -38,14 +46,26 @@ if [[ ! -f build/AppIcon.icns ]]; then
 fi
 
 rm -rf "${APP:?}"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/Keet" "$APP/Contents/MacOS/Keet"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp -R "$BIN/FluidAudio_FluidAudio.bundle" "$APP/Contents/Resources/"
+# whisper.cpp, for Hebrew. The binary finds it through @executable_path/../Frameworks.
+ditto "$BIN/whisper.framework" "$APP/Contents/Frameworks/whisper.framework"
 
+# The framework first, then the app around it, both with the same identity so the
+# hardened runtime's library validation accepts it. Ad hoc signatures have no Team ID,
+# so library validation would refuse the framework; ad hoc builds turn it off.
+ENTITLEMENTS=Resources/Keet.entitlements
+if [[ "$IDENTITY" == "-" ]]; then
+  ENTITLEMENTS=build/Keet-adhoc.entitlements
+  cp Resources/Keet.entitlements "$ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENTITLEMENTS"
+fi
+codesign --force --options runtime --timestamp=none "${SIGN[@]}" "$APP/Contents/Frameworks/whisper.framework"
 codesign --force --deep --options runtime --timestamp=none \
-  --entitlements Resources/Keet.entitlements --sign "$IDENTITY" "$APP"
+  --entitlements "$ENTITLEMENTS" "${SIGN[@]}" "$APP"
 codesign --verify --strict "$APP"
 echo "built $APP"
 

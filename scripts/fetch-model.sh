@@ -1,14 +1,15 @@
 #!/bin/bash
-# Downloads the exact Core ML models Keet uses into FluidAudio's model cache, pinned to
-# one Hugging Face revision each and checked against SHA-256.
+# Downloads the exact models Keet uses, pinned to one Hugging Face revision each and
+# checked against SHA-256.
 #
 # Keet can also download them itself (the speech model on first launch, the Dictionary's
-# model when you add your first word). This script exists because it's resumable and
-# parallel: on slow or throttled connections big files arrive in eight ranges, each
-# resuming where it stopped.
+# model when you add your first word, the Hebrew model when you pick a Hebrew key). This
+# script exists because it's resumable and parallel: on slow or throttled connections big
+# files arrive in eight ranges, each resuming where it stopped.
 #
 #   scripts/fetch-model.sh                 # the speech model
 #   scripts/fetch-model.sh --dictionary    # plus the Dictionary's word-spotting model
+#   scripts/fetch-model.sh --hebrew        # plus the Hebrew model (1.6 GB)
 set -euo pipefail
 
 MODELS="$HOME/Library/Application Support/FluidAudio/Models"
@@ -57,6 +58,14 @@ CTC_FILES=(
   "4f288bfe5cbe867ef1e592cdae33578b2fe59ada69182fc12209879558f985c2 3456 AudioEncoder.mlmodelc/metadata.json"
   "8906c823e9bb3bf6b16d9f0308f98cd70573526333ad85dd767dc3f9ae6b25fa 243 AudioEncoder.mlmodelc/analytics/coremldata.bin"
   "af0734b4a5d7465ad9e8bb170f0c53c5e6b91ebb75a9bdf88d3f59ae4ad6aebd 100778304 AudioEncoder.mlmodelc/weights/weight.bin"
+)
+
+# Hebrew: ivrit.ai's fine-tune of Whisper Large v3 Turbo, for whisper.cpp.
+HEBREW_REPO="ivrit-ai/whisper-large-v3-turbo-ggml"
+HEBREW_REVISION="2130c78e4a9cb4914cc4df91a1c3031407789705"
+HEBREW_DEST="${KEET_HEBREW_DIR:-$HOME/Library/Application Support/Keet/Models/ivrit-ai-whisper-large-v3-turbo}"
+HEBREW_FILES=(
+  "c8090411113357097bfafc2b8e228ec1639fa7f5fe4ecb5d054ac0ccef8641b1 1624555275 ggml-model.bin"
 )
 
 sha_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
@@ -138,6 +147,10 @@ fetch_set() { # repo revision dest entries...
 }
 
 fetch_set "$SPEECH_REPO" "$SPEECH_REVISION" "$SPEECH_DEST" "${SPEECH_FILES[@]}"
-if [[ "${1:-}" == "--dictionary" ]]; then
-  fetch_set "$CTC_REPO" "$CTC_REVISION" "$CTC_DEST" "${CTC_FILES[@]}"
-fi
+for option in "$@"; do
+  case "$option" in
+    --dictionary) fetch_set "$CTC_REPO" "$CTC_REVISION" "$CTC_DEST" "${CTC_FILES[@]}" ;;
+    --hebrew) fetch_set "$HEBREW_REPO" "$HEBREW_REVISION" "$HEBREW_DEST" "${HEBREW_FILES[@]}" ;;
+    *) echo "unknown option: $option" >&2; exit 2 ;;
+  esac
+done

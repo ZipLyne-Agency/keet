@@ -6,7 +6,7 @@ and each design decision with the measurement behind it.
 
 ## What Keet does
 
-Five behaviors define it. Everything else serves these.
+Seven behaviors define it. Everything else serves these.
 
 1. **Hold a key to talk.** Left Option by default. Holding it alone starts recording.
    Option with another key, a click, or another modifier in the first 0.6 seconds is
@@ -22,6 +22,8 @@ Five behaviors define it. Everything else serves these.
    the text lands shortly after the key comes up.
 6. **Never lose a long dictation.** Four minutes of talking must survive a bumped key, a
    click, or even Escape.
+7. **Hebrew on its own key.** Holding a function key you pick (F12, say) dictates in
+   Hebrew with a Hebrew model. Everything above applies to it too.
 
 ## What you need
 
@@ -30,9 +32,9 @@ Five behaviors define it. Everything else serves these.
 | Mac | MacBook Pro, M5 Max, 128 GB | Any Apple Silicon Mac (M1 or later) |
 | macOS | 27.0 | 15.0 Sequoia (the deployment target) |
 | Xcode | 27.0, Swift 6.4 | 26, Swift 6.2 (what CI builds with) |
-| Disk | | About 615 MB for the model, plus about 1 GB for the build folder |
-| Memory | Keet uses 58 MB at rest (75 MB peak, measured with `footprint`) | |
-| Network | Only to download the model once | |
+| Disk | | About 615 MB for the model, plus about 1 GB for the build folder; 1.6 GB more for Hebrew |
+| Memory | Keet uses 58 MB at rest (75 MB peak, measured with `footprint`); 1.84 GB with Hebrew on (2.0 GB peak) | |
+| Network | Only to download the models once | |
 | AI cleanup (optional) | Apple Intelligence on, macOS 27 | macOS 26 with Apple Intelligence; skipped without it |
 | Apple developer certificate | Developer ID Application | Optional; without one the app is signed ad hoc |
 
@@ -59,7 +61,8 @@ FluidInference.
 Parakeet was chosen over Whisper because it decodes the whole clip in one pass rather
 than generating text word by word, which makes it much faster and means it doesn't
 invent text during silence. The unified model was chosen over Parakeet TDT v2 and v3
-because it is the most accurate of the English Parakeet models. It is English only.
+because it is the most accurate of the English Parakeet models. It is English only;
+Hebrew uses a second model on its own key (see [Hebrew](#hebrew)).
 
 ### The files Keet uses
 
@@ -112,7 +115,8 @@ one-time setup cost.
 ## How one dictation flows
 
 1. **Key down.** A listen-only event tap sees Left Option go down alone and tells the
-   controller. The controller starts the audio engine on its audio queue and asks the
+   controller. (The Hebrew key arrives as a registered hot key instead; see
+   [Hebrew](#hebrew).) The controller starts the audio engine on its audio queue and asks the
    frontmost app to build its accessibility tree (Electron and Chrome only do so when
    asked).
 2. **Capture.** An `AVAudioSinkNode` receives every hardware cycle (about 10 ms) and copies
@@ -557,11 +561,106 @@ touches the microphone without it), the `com.apple.security.device.audio-input`
 entitlement under the hardened runtime, and `LSUIElement` so it lives in the menu bar
 without a Dock icon. It shows a Dock icon only while its window is open.
 
+whisper.cpp ships inside the bundle as `Contents/Frameworks/whisper.framework`, signed
+with the same identity as the app, because the hardened runtime only loads libraries
+from the app's own Team ID. An ad hoc signature has no Team ID, so ad hoc builds also get
+`com.apple.security.cs.disable-library-validation`; signed builds don't.
+
+### Hebrew
+
+Hebrew has its own key because the English model can't do Hebrew and guessing the
+language from the audio would add a step that can guess wrong. Holding the Hebrew key
+records exactly like the English key (same pill, with an "HE" tag; same tail; same
+delivery), then sends the audio to a Hebrew model.
+
+**The model.** ivrit.ai's Hebrew fine-tune of Whisper Large v3 Turbo,
+[`ivrit-ai/whisper-large-v3-turbo-ggml`](https://huggingface.co/ivrit-ai/whisper-large-v3-turbo-ggml)
+revision `2130c78e4a9cb4914cc4df91a1c3031407789705` (Apache-2.0), one file:
+
+| File | Size (bytes) | SHA-256 |
+|---|---:|---|
+| `ggml-model.bin` | 1,624,555,275 | `c8090411113357097bfafc2b8e228ec1639fa7f5fe4ecb5d054ac0ccef8641b1` |
+
+It lives in `~/Library/Application Support/Keet/Models/ivrit-ai-whisper-large-v3-turbo/`.
+Keet downloads it when you first pick a Hebrew key, checks the size and SHA-256, and only
+then moves it into place. It checks the SHA-256 again at every launch before loading it
+(about 0.75 s, in the background), and deletes and downloads it again if it doesn't match.
+
+It was chosen from ivrit.ai's [Hebrew transcription leaderboard](https://huggingface.co/spaces/ivrit-ai/hebrew-transcription-leaderboard)
+(checked October 2026; last updated June 2026). Word error rates, lower is better:
+
+| Model or service | ivrit.ai eval-d1 | WhatsApp voice notes | SASpeech | FLEURS Hebrew | Kan news |
+|---|---:|---:|---:|---:|---:|
+| ivrit.ai Whisper Large v3 Turbo (Keet) | 5.3% | 7.1% | 6.6% | 18.1% | 8.2% |
+| ivrit.ai Whisper Large v3 | 5.1% | 7.2% | 6.4% | 17.4% | 8.1% |
+| Soniox (cloud) | 4.8% | 9.0% | 6.5% | 17.7% | 11.4% |
+| Amazon Transcribe (cloud, batch) | 6.6% | 10.4% | 8.5% | 23.0% | 9.0% |
+| Deepgram Nova-3 (cloud) | 6.7% | 12.0% | 10.2% | 23.3% | 21.0% |
+| OpenAI gpt-4o-transcribe (cloud) | 7.3% | 12.6% | 10.9% | 21.0% | 39.4% |
+| OpenAI Whisper Large v3 Turbo (not fine-tuned) | 8.4% | 12.8% | 10.4% | 28.9% | 15.6% |
+| NVIDIA Nemotron 3.5 ASR 0.6B (FluidAudio's multilingual model) | 17.1% | 36.5% | 24.2% | 46.0% | 54.2% |
+
+Turbo is within a few tenths of a point of the full Large v3 fine-tune (ahead of it on
+WhatsApp voice notes) with a 4-layer decoder instead of 32, so it writes text several
+times faster. It beats Amazon, Deepgram and OpenAI on every set and is level with Soniox,
+the best cloud service there: ahead on voice notes and news, slightly behind on the rest.
+Apple's on-device `DictationTranscriber` supports Hebrew on macOS 27 but isn't on the
+leaderboard (`SpeechTranscriber` doesn't support Hebrew at all).
+
+**The runtime.** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.4 (MIT),
+from its release XCFramework, running on the GPU through Metal with flash attention,
+greedy decoding, language forced to Hebrew (the fine-tune's language detection is
+degraded), no timestamps. Measured on an M5 Max against ten real Hebrew clips from
+Google's FLEURS set (2.6 to 25 seconds):
+
+| | whisper.cpp, ivrit.ai's own weights (Keet) | WhisperKit 1.1, a third-party Core ML conversion |
+|---|---|---|
+| Encoder, per dictation | about 135 ms (GPU) | about 220 ms (Neural Engine or GPU, the same) |
+| Each token of text | about 1.6 ms | about 5.5 to 9 ms |
+| A dictation, end to end | 165 to 460 ms, median 304 ms | 380 to 1,260 ms |
+| Words | | Got "בחצר הכנסייה" ("in the church yard") wrong as "בחצרת נסיעה", "קברים" (graves) as "גברים" (men), "בלבד" as "מנו" |
+
+The Core ML conversion made the same mistakes at int8 and fp16, so they come from the
+conversion, not the quantization; whisper.cpp on ivrit.ai's own published file got those
+words right. Beam search (5 beams) changed one clip of ten for the better and added 50 to 80 ms, so
+Keet decodes greedily. Whisper writes Hebrew at about one token per two letters, which is
+why a long Hebrew dictation costs more than its length suggests.
+
+| Measurement | Result |
+|---|---|
+| First load after installing Keet (Metal compiles its shaders) | 16 to 22 s |
+| Every load after that, plus a warm-up run | 0.6 to 1.5 s, after a 0.75 s checksum |
+| Memory with Hebrew on | 1.84 GB (2.0 GB peak); setting the key to Off frees it |
+
+Keet loads the Hebrew model after the English one at launch, so English is never kept
+waiting, and runs one warm-up so the first Hebrew dictation is as fast as the rest.
+Pressing the Hebrew key before it's ready beeps and shows a card saying how far the
+download or load has got.
+
+**The key.** A bare function key isn't a modifier: it reaches the app you're in (F12
+jumps to a definition in VS Code) and repeats while held. So it isn't read by the
+listen-only tap. Keet registers it as a hot key with `RegisterEventHotKey`, which takes
+the key for itself and, measured on macOS 27, sends exactly one press and one release
+however long it's held. The tap still sees the key and skips it. While it's held, Escape
+cancels (and keeps a long dictation, as with the English key), other keys do nothing,
+and the English key is ignored; the same holds the other way round. On a Mac keyboard
+the F keys are brightness and volume unless you hold Fn or turn on "Use F1, F2, etc. keys
+as standard function keys"; on other keyboards they're plain F keys. If the English key is
+Fn (Globe), Fn plus an F key starts an English dictation first, so on a Mac keyboard use
+the standard-function-keys setting instead. As with the English key, Keet won't start a
+dictation while a password field has secure input on.
+
+**What's left out for Hebrew.** AI cleanup and the Dictionary are built for English
+(filler words, English word lists, an English word spotter), so Hebrew dictations skip
+both. Live words are skipped too: re-running Whisper several times a second would compete
+with the final pass on the GPU. Very short recordings (under 0.3 s) come back empty
+rather than risk Whisper inventing words.
+
 ### History
 
 Dictations are stored in `~/Library/Application Support/Keet/history.json`: text, time,
 the app it went to, recording length, key-release-to-text time, and whether it was
-pasted, shown on the card, or cancelled with Escape. Up to 10,000 are kept. Turning off **Keep history on this Mac**
+pasted, shown on the card, or cancelled with Escape, and its language. Up to 10,000 are kept. Turning off **Keep history on this Mac**
 deletes the file and keeps entries in memory until Keet quits.
 
 ## Build it
@@ -589,6 +688,8 @@ scripts/make-test-clips.sh ~/keet-clips      # 12 spoken sentences in 10 macOS v
 .build/release/keet-bench lastword ~/keet-clips
 .build/release/keet-bench tail ~/keet-clips -60          # room noise dB, optional speech gain dB
 .build/release/keet-bench mic 3              # needs microphone permission for your terminal
+.build/release/keet-bench hebrew <dir>       # Hebrew model: latency, text, and a word error
+                                             # rate when <dir> has a picks.tsv
 ```
 
 Expected, on Apple Silicon: transcription in tens of milliseconds, 12 of 12 last words
@@ -638,13 +739,14 @@ typing: the pasted text lands in whatever app has focus.
 | Path | What it holds |
 |---|---|
 | `Sources/KeetCore/Transcriber.swift` | Loading, warming and running the model |
+| `Sources/KeetCore/HebrewTranscriber.swift` | Downloading, loading and running the Hebrew model through whisper.cpp |
 | `Sources/KeetCore/AudioRecorder.swift` | Sink-node capture, device selection, test injection |
 | `Sources/KeetCore/AudioDevices.swift` | Listing input devices and watching for changes |
 | `Sources/KeetCore/SpeechTail.swift` | Loudness tracking, noise floor, threshold, the tail rule |
 | `Sources/KeetCore/Cleanup.swift` | AI cleanup and the rules that decide which edits are kept |
 | `Sources/KeetCore/VocabularyGuard.swift` | Which of the Dictionary's word swaps are applied |
 | `Sources/Keet/AppController.swift` | One dictation from key press to delivered text |
-| `Sources/Keet/HotkeyMonitor.swift` | The event tap and bare-key rules |
+| `Sources/Keet/HotkeyMonitor.swift` | The event tap and bare-key rules, and the Hebrew hot key |
 | `Sources/Keet/TextInserter.swift` | Focus detection, paste, clipboard restore |
 | `Sources/Keet/Overlay.swift` | The pill and the Copy card |
 | `Sources/Keet/MainWindow.swift` | The history and settings window |
@@ -684,12 +786,19 @@ field in a way Keet doesn't recognize. Open an issue with the app's name.
 `scripts/fetch-model.sh` fetches the big file in eight parallel, resumable pieces; run it
 again to continue where it stopped.
 
+**The Hebrew key does nothing, or changes the volume.** On a Mac keyboard, hold Fn with
+the F key, or turn on System Settings > Keyboard > "Use F1, F2, etc. keys as standard
+function keys". If Settings says another app already uses the key, pick a different one.
+The first time, the key waits for the 1.6 GB download; `scripts/fetch-model.sh --hebrew`
+fetches it in resumable pieces.
+
 **AirPods sound bad while I dictate.** Bluetooth headsets switch to call quality while
 their microphone is in use. Pick the Mac's built-in or a USB microphone in Settings.
 
 ## Known limits
 
-- English only.
+- English and Hebrew, one language per key. A Hebrew dictation with English words in it
+  gets them in Hebrew letters or Latin ones, as the Hebrew model chooses.
 - AI cleanup needs Apple Intelligence and skips dictations over 100 words. It only
   removes fillers and repeats and fixes near-sounding words; it won't restructure a
   sentence or keep just the corrected half of "at five, no, at six".
