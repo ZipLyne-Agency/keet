@@ -1,5 +1,8 @@
 import AppKit
 import Carbon.HIToolbox
+import os
+
+private let log = Logger(subsystem: "agency.ziplyne.keet", category: "hotkey")
 
 /// The key held to dictate. Raw values are macOS virtual key codes.
 enum HotkeyChoice: Int, CaseIterable {
@@ -69,6 +72,31 @@ enum FunctionKey: Int, CaseIterable {
     var title: String { "F\(Self.allCases.firstIndex(of: self)! + 1)" }
 }
 
+/// Polls the real key state while a dictation key is held. The key events can miss the
+/// release (the tap was briefly off, secure input took the keyboard, the main thread
+/// stalled), and then the pill would listen until the 30-minute limit with nothing that
+/// stops it. This catches that within a quarter second of letting go.
+final class ReleaseWatch {
+    private var timer: Timer?
+
+    func start(isDown: @escaping () -> Bool, onMissedRelease: @escaping () -> Void) {
+        stop()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard !isDown() else { return }
+            self?.stop()
+            onMissedRelease()
+        }
+        // Common modes, so it still fires while a menu is open.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
 /// Holds a bare function key as a second dictation key, through a registered hot key.
 /// Unlike the listen-only tap, a hot key takes the key for itself: the app you're in
 /// never sees the F12 meant for Keet (in VS Code it would jump to a definition), and
@@ -83,6 +111,7 @@ final class FunctionKeyHotkey {
     private var registration: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var held = false
+    private let releaseWatch = ReleaseWatch()
 
     init() {
         var types = [
@@ -111,6 +140,7 @@ final class FunctionKeyHotkey {
         if let registration { UnregisterEventHotKey(registration) }
         registration = nil
         held = false
+        releaseWatch.stop()
         self.key = key
         guard let key else { return true }
         let status = RegisterEventHotKey(
@@ -126,8 +156,16 @@ final class FunctionKeyHotkey {
             guard !held, !IsSecureEventInputEnabled() else { return }
             held = true
             onPress()
+            guard let key else { return }
+            releaseWatch.start(
+                isDown: { CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(key.rawValue)) },
+                onMissedRelease: { [weak self] in
+                    log.error("\(key.title, privacy: .public) is up but its release never arrived; ending the dictation")
+                    self?.handle(pressed: false)
+                })
         } else if held {
             held = false
+            releaseWatch.stop()
             onRelease()
         }
     }
@@ -167,6 +205,7 @@ final class HotkeyMonitor {
     private var held = false
     private var cancelled = false
     private var pressedAt: CFAbsoluteTime = 0
+    private let releaseWatch = ReleaseWatch()
 
     private var inShortcutWindow: Bool { CFAbsoluteTimeGetCurrent() - pressedAt < shortcutWindow }
 
@@ -205,15 +244,26 @@ final class HotkeyMonitor {
         return true
     }
 
+    private func released() {
+        held = false
+        releaseWatch.stop()
+        if !cancelled { onRelease() }
+    }
+
+    private func missedRelease() {
+        guard held else { return }
+        let tapOn = tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
+        log.error("\(self.choice.title, privacy: .public) is up but its release never arrived (tap enabled: \(tapOn)); ending the dictation")
+        if let tap, !tapOn { CGEvent.tapEnable(tap: tap, enable: true) }
+        released()
+    }
+
     private func handle(_ type: CGEventType, _ event: CGEvent) {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             // A release may have happened while the tap was off.
-            if held, !choice.isDown(CGEventSource.flagsState(.combinedSessionState)) {
-                held = false
-                if !cancelled { onRelease() }
-            }
+            if held, !choice.isDown(CGEventSource.flagsState(.combinedSessionState)) { released() }
 
         case .flagsChanged:
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
@@ -228,9 +278,11 @@ final class HotkeyMonitor {
                     cancelled = false
                     pressedAt = CFAbsoluteTimeGetCurrent()
                     onPress()
+                    releaseWatch.start(
+                        isDown: { [choice] in choice.isDown(CGEventSource.flagsState(.combinedSessionState)) },
+                        onMissedRelease: { [weak self] in self?.missedRelease() })
                 } else if !down, held {
-                    held = false
-                    if !cancelled { onRelease() }
+                    released()
                 }
             } else if held, choice.othersHeld(flags), inShortcutWindow {
                 cancel(.shortcut)
