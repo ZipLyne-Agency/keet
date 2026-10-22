@@ -25,6 +25,7 @@ let package = Package(
         ),
         .executableTarget(name: "keet-bench", dependencies: ["KeetCore"]),
         .testTarget(name: "KeetCoreTests", dependencies: ["KeetCore"]),
+        .testTarget(name: "KeetTests", dependencies: ["Keet"]),
     ],
     swiftLanguageModes: [.v5]
 )

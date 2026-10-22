@@ -79,6 +79,8 @@ enum FunctionKey: Int, CaseIterable {
 final class ReleaseWatch {
     private var timer: Timer?
 
+    deinit { stop() }
+
     func start(isDown: @escaping () -> Bool, onMissedRelease: @escaping () -> Void) {
         stop()
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -131,6 +133,12 @@ final class FunctionKeyHotkey {
                 return noErr
             },
             types.count, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
+    }
+
+    deinit {
+        releaseWatch.stop()
+        if let registration { UnregisterEventHotKey(registration) }
+        if let handler { RemoveEventHandler(handler) }
     }
 
     /// Takes `key` for Keet, or gives the current one back with nil. Returns false when
@@ -200,8 +208,7 @@ final class HotkeyMonitor {
     /// main key do nothing.
     var functionKeyHeld = false
 
-    private var tap: CFMachPort?
-    private var source: CFRunLoopSource?
+    private var listener: KeyboardEventTap?
     private var held = false
     private var cancelled = false
     private var pressedAt: CFAbsoluteTime = 0
@@ -217,30 +224,20 @@ final class HotkeyMonitor {
 
     init(choice: HotkeyChoice) { self.choice = choice }
 
-    var isRunning: Bool { tap != nil }
+    deinit {
+        releaseWatch.stop()
+        listener?.stop()
+    }
+
+    var isRunning: Bool { listener != nil }
 
     /// Returns false when macOS refuses the tap (Accessibility not granted yet).
     @discardableResult
     func start() -> Bool {
-        guard tap == nil else { return true }
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
-        let mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
-            eventsOfInterest: mask,
-            callback: { _, type, event, refcon in
-                if let refcon {
-                    Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue().handle(type, event)
-                }
-                return Unmanaged.passUnretained(event)
-            },
-            userInfo: refcon
-        ) else { return false }
-        self.tap = tap
-        source = CFMachPortCreateRunLoopSource(nil, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        guard listener == nil else { return true }
+        let listener = KeyboardEventTap { [weak self] in self?.handle($0) }
+        guard listener.start() else { return false }
+        self.listener = listener
         return true
     }
 
@@ -252,28 +249,44 @@ final class HotkeyMonitor {
 
     private func missedRelease() {
         guard held else { return }
-        let tapOn = tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
+        let tapOn = listener?.isEnabled ?? false
         log.error("\(self.choice.title, privacy: .public) is up but its release never arrived (tap enabled: \(tapOn)); ending the dictation")
-        if let tap, !tapOn { CGEvent.tapEnable(tap: tap, enable: true) }
+        if !tapOn { listener?.enable() }
         released()
     }
 
-    private func handle(_ type: CGEventType, _ event: CGEvent) {
+    func handle(_ type: CGEventType, _ event: CGEvent) {
+        handle(KeyboardEventSnapshot(type, event))
+    }
+
+    private func handle(_ event: KeyboardEventSnapshot) {
+        let type = event.type
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            listener?.enable()
             // A release may have happened while the tap was off.
             if held, !choice.isDown(CGEventSource.flagsState(.combinedSessionState)) { released() }
 
         case .flagsChanged:
-            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            let code = event.code
             let flags = event.flags
+            // Every modifier event carries the complete modifier state. Recover a
+            // missed release immediately, even when another modifier changed next.
+            if held, !choice.isDown(flags) {
+                released()
+                return
+            }
             if code == choice.rawValue {
                 let down = choice.isDown(flags)
                 if down, !held {
                     // Only a bare press dictates; with other modifiers it's a shortcut. While
                     // the Hebrew key is held, the main key is ignored altogether.
                     guard !choice.othersHeld(flags), !IsSecureEventInputEnabled(), !functionKeyHeld else { return }
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if event.timestamp > 0, now > event.timestamp {
+                        let delay = Int((now - event.timestamp) / 1_000_000)
+                        if delay >= 50 { log.notice("shortcut delivery delayed by \(delay) ms") }
+                    }
                     held = true
                     cancelled = false
                     pressedAt = CFAbsoluteTimeGetCurrent()
@@ -289,7 +302,7 @@ final class HotkeyMonitor {
             }
 
         case .keyDown:
-            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            let code = event.code
             if code == functionKeyCode { return }
             // During a Hebrew dictation the main key's state doesn't matter: Escape
             // cancels it, and nothing else does.
@@ -307,7 +320,7 @@ final class HotkeyMonitor {
                 // Later keys are ignored: a bumped key must not throw away minutes of speech.
             } else {
                 // Our own Command-V paste arrives here too; it isn't the user.
-                if event.getIntegerValueField(.eventSourceUserData) != TextInserter.syntheticEventTag {
+                if event.sourceTag != TextInserter.syntheticEventTag {
                     onActivity()
                 }
                 if code == kVK_Escape { onEscape() }

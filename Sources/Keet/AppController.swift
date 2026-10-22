@@ -63,17 +63,14 @@ final class AppController: ObservableObject {
     /// nil follows the system default input.
     @Published private(set) var selectedMicUID: String?
     @Published private(set) var isTestingMic = false
-    @Published private(set) var micTestLevel: Float = 0
     /// The app you were in before switching to Keet; history's "Paste into" targets it.
     @Published private(set) var lastExternalApp: NSRunningApplication?
     /// Play a chime when a hold becomes a dictation.
     @Published var startSoundOn: Bool = UserDefaults.standard.object(forKey: "startSound") as? Bool ?? true {
         didSet { UserDefaults.standard.set(startSoundOn, forKey: "startSound") }
     }
-    /// Live input level (0...1) while dictating or testing, for the window's meter.
-    @Published private(set) var liveLevel: Float = 0
-    @Published private(set) var micTestPeakDb: Float = -120
-    @Published private(set) var micTestNoiseDb: Float = -120
+    /// Only the meters observe these frequent updates, never the transcript feed.
+    let audioLevels = AudioLevels()
     /// macOS voice processing: noise suppression and echo cancellation on the input.
     /// On a desk microphone it cut the room noise by 17 dB in a one-off recording, but in
     /// the app's start/stop cycle the voice-processing unit failed (CoreAudio -10877) and
@@ -119,7 +116,8 @@ final class AppController: ObservableObject {
     private var deviceWatcher: AudioDeviceWatcher?
     private var activationObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
-    private var micTestTimer: DispatchSourceTimer?
+    // Owned exclusively by audioQueue, like the recorder and session pumps.
+    nonisolated(unsafe) private var micTestTimer: DispatchSourceTimer?
     private var liveTask: Task<Void, Never>?
 
     /// Holds shorter than this are treated as a stray tap of the key.
@@ -128,13 +126,13 @@ final class AppController: ObservableObject {
     private let pillDelay: TimeInterval = 0.16
 
     private var session: Session?
-    private var sessionCounter = 0
+    private let dictationWork = DictationWorkQueue()
 
     /// Audio-side state for the recording in progress. Touched only on `audioQueue`.
     private final class Session: @unchecked Sendable {
         let id: Int
         let language: DictationLanguage
-        let pressed = CFAbsoluteTimeGetCurrent()
+        let pressed: CFAbsoluteTime
         var released: CFAbsoluteTime?
         var tracker: EnergyTracker
         var readIndex = 0
@@ -148,9 +146,10 @@ final class AppController: ObservableObject {
         /// Escape on a long dictation: transcribe and keep it, but don't paste.
         var keepOnly = false
 
-        init(id: Int, language: DictationLanguage, sampleRate: Double) {
+        init(id: Int, language: DictationLanguage, sampleRate: Double, pressed: CFAbsoluteTime) {
             self.id = id
             self.language = language
+            self.pressed = pressed
             tracker = EnergyTracker(sampleRate: sampleRate)
         }
     }
@@ -205,8 +204,15 @@ final class AppController: ObservableObject {
         }
     }
 
+    deinit {
+        let center = NSWorkspace.shared.notificationCenter
+        if let activationObserver { center.removeObserver(activationObserver) }
+        if let wakeObserver { center.removeObserver(wakeObserver) }
+    }
+
     func start() {
         audioQueue.async { [recorder] in try? recorder.prepare() }
+        overlay.prepare()
         // A registered hot key needs no permission, so it's taken right away.
         if let key = hebrewKey { hebrewKeyTaken = !functionHotkey.register(key) }
         // UI tests can run without touching the model.
@@ -437,10 +443,7 @@ final class AppController: ObservableObject {
                 let noise = tracker.noiseFloorDb
                 let done = CFAbsoluteTimeGetCurrent() - started > 10
                 DispatchQueue.main.async {
-                    self?.micTestLevel = level
-                    self?.liveLevel = level
-                    self?.micTestPeakDb = recentPeak
-                    self?.micTestNoiseDb = noise
+                    self?.audioLevels.update(level: level, peakDb: recentPeak, noiseDb: noise)
                     if done { self?.stopMicTest() }
                 }
             }
@@ -452,10 +455,7 @@ final class AppController: ObservableObject {
     func stopMicTest() {
         guard isTestingMic else { return }
         isTestingMic = false
-        micTestLevel = 0
-        liveLevel = 0
-        micTestPeakDb = -120
-        micTestNoiseDb = -120
+        audioLevels.reset()
         audioQueue.async { [weak self, recorder] in
             self?.micTestTimer?.cancel()
             self?.micTestTimer = nil
@@ -478,6 +478,7 @@ final class AppController: ObservableObject {
     // MARK: - Dictation lifecycle
 
     private func keyPressed(_ language: DictationLanguage) {
+        let pressed = CFAbsoluteTimeGetCurrent()
         // One dictation key at a time: the other is ignored until this one is let go.
         if let held = heldLanguage, held != language { return }
         let modelReady = language == .hebrew ? hebrewState.isReady : modelState.isReady
@@ -493,19 +494,13 @@ final class AppController: ObservableObject {
         hotkey.functionKeyHeld = language == .hebrew
         if isTestingMic { stopMicTest() }
         if overlay.isShowingResult { overlay.hide() }
-        inserter.prime()
-        if cleanupWanted, language == .english {
-            Task.detached(priority: .userInitiated) { [cleanup] in cleanup.prepare() }
-        }
-
         // A new press during the previous dictation's tail finishes that one now.
         if let previous = session {
             audioQueue.async { [weak self] in self?.finish(previous) }
         }
-        sessionCounter += 1
-        let current = Session(id: sessionCounter, language: language, sampleRate: recorder.sampleRate)
+        let current = Session(id: dictationWork.beginRecording(), language: language,
+                              sampleRate: 48_000, pressed: pressed)
         session = current
-        phase = .listening
         log.notice("session \(current.id): \(language.rawValue, privacy: .public) key down")
 
         audioQueue.async { [weak self, recorder] in
@@ -514,7 +509,12 @@ final class AppController: ObservableObject {
                 try recorder.start()
             } catch {
                 log.error("microphone start failed: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async { self.cancel(.shortcut) }
+                DispatchQueue.main.async {
+                    guard self.session === current else { return }
+                    self.cancel(.shortcut)
+                    self.overlay.showResult("Check your microphone in Settings and try again.",
+                                            note: "The microphone couldn't start")
+                }
                 return
             }
             // The device rate is known only once the engine is built.
@@ -527,11 +527,17 @@ final class AppController: ObservableObject {
             pump.resume()
         }
 
+        phase = .listening
+        inserter.prime()
+        if cleanupWanted, language == .english {
+            Task.detached(priority: .userInitiated) { [cleanup] in cleanup.prepare() }
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + pillDelay) { [weak self] in
             guard let self, self.session === current else { return }
+            if self.startSoundOn { self.startSound.play() }
             self.overlay.showListening(
                 since: Date(timeIntervalSinceReferenceDate: current.pressed), tag: language == .hebrew ? "HE" : nil)
-            if self.startSoundOn { self.startSound.play() }
             // After the chime (105 ms plus output latency) so you still hear it. On the
             // audio queue, so it can't land after this recording already finished.
             if self.muteSpeakers {
@@ -555,11 +561,20 @@ final class AppController: ObservableObject {
         liveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
             while !Task.isCancelled, let self, self.session === current, self.phase == .listening {
-                let rate = self.recorder.sampleRate
-                let count = self.recorder.capturedCount
-                let start = max(0, count - Int(rate * 14))
-                if count - start > Int(rate * 0.4),
-                   let pcm = try? self.transcriber.resample(self.recorder.samples(from: start, to: count), from: rate),
+                // Take one consistent snapshot on the recorder's queue. Stop or a
+                // device rebuild must not reset its storage while preview reads it.
+                let (samples, rate) = await withCheckedContinuation { continuation in
+                    self.audioQueue.async { [recorder = self.recorder] in
+                        let rate = recorder.sampleRate
+                        let count = recorder.capturedCount
+                        let start = max(0, count - Int(rate * 14))
+                        continuation.resume(returning: (recorder.samples(from: start, to: count), rate))
+                    }
+                }
+                if samples.count > Int(rate * 0.4),
+                   let pcm = try? await Task.detached(priority: .userInitiated, operation: { [transcriber = self.transcriber] in
+                       try transcriber.resample(samples, from: rate)
+                   }).value,
                    let text = try? await self.transcriber.transcribe(pcm),
                    !Task.isCancelled, self.session === current, self.phase == .listening, !text.isEmpty {
                     self.overlay.setLiveText(text)
@@ -618,7 +633,7 @@ final class AppController: ObservableObject {
         log.notice("session \(current.id): cancelled")
         session = nil
         phase = .idle
-        liveLevel = 0
+        audioLevels.reset()
         overlay.hide()
         audioQueue.async { [recorder, speakerMute] in
             guard !current.finished else { return }
@@ -653,8 +668,9 @@ final class AppController: ObservableObject {
             current.lastMeterPush = now
             let level = current.tracker.meterLevel
             DispatchQueue.main.async { [weak self] in
-                self?.overlay.push(level: level)
-                self?.liveLevel = level
+                guard let self, self.session === current else { return }
+                self.overlay.push(level: level)
+                self.audioLevels.update(level: level)
             }
         }
 
@@ -696,10 +712,10 @@ final class AppController: ObservableObject {
         recorder.invalidate()
         let name = recorder.activeDeviceName ?? "the microphone"
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if self.session === current { self.session = nil }
+            guard let self, self.session === current else { return }
+            self.session = nil
             self.phase = .idle
-            self.liveLevel = 0
+            self.audioLevels.reset()
             NSSound.beep()
             self.overlay.showResult(
                 "Keet isn't getting any sound from \(name).",
@@ -755,19 +771,21 @@ final class AppController: ObservableObject {
         _ samples: [Float], rate: Double, released: CFAbsoluteTime, peakDb: Float, noiseDb: Float, tailMs: Int,
         session current: Session
     ) {
-        let isLatest = session === current || session == nil
+        let isLatest = dictationWork.isLatest(current.id)
         if session === current { session = nil }
-        liveLevel = 0
         if isLatest {
+            audioLevels.reset()
             phase = .transcribing
             overlay.showTranscribing()
         }
-        Task { [weak self] in
+        dictationWork.enqueue { [weak self] in
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
             var text = ""
             do {
-                let pcm = try self.transcriber.resample(samples, from: rate)
+                let pcm = try await Task.detached(priority: .userInitiated) { [transcriber = self.transcriber] in
+                    try transcriber.resample(samples, from: rate)
+                }.value
                 if let fake = ProcessInfo.processInfo.environment["KEET_FAKE_TEXT"] {
                     text = fake  // insertion tests without the model
                 } else if current.language == .hebrew {
@@ -777,6 +795,12 @@ final class AppController: ObservableObject {
                 }
             } catch {
                 log.error("transcription failed: \(error.localizedDescription, privacy: .public)")
+                if self.dictationWork.isLatest(current.id), self.session == nil {
+                    self.phase = .idle
+                    self.overlay.showResult("Try again. If this keeps happening, reopen Keet.",
+                                            note: "The speech couldn't be transcribed")
+                }
+                return
             }
             let transcribeMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             var cleaned: Cleanup.Result?
@@ -789,7 +813,7 @@ final class AppController: ObservableObject {
             let latencyMs = Int((CFAbsoluteTimeGetCurrent() - released) * 1000)
             let keepOnly = await self.keepOnly(current)
             self.deliver(cleaned?.text ?? text, raw: cleaned?.changed == true ? text : nil, language: current.language,
-                         ownsOverlay: isLatest,
+                         ownsOverlay: self.dictationWork.isLatest(current.id),
                          audioSeconds: Double(samples.count) / max(rate, 1),
                          latencyMs: latencyMs, peakDb: peakDb, noiseDb: noiseDb,
                          timing: (tailMs, transcribeMs, cleaned?.ms), keepOnly: keepOnly)

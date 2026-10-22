@@ -114,6 +114,28 @@ one-time setup cost.
 
 ## How one dictation flows
 
+### Checking recording startup
+
+Run the signed app's headless lifecycle probe with a stable, connected microphone:
+
+```bash
+KEET_LATENCY_PROBE="$(agentreel dir --temp recording-check)/latency.json" \
+  /Applications/Keet.app/Contents/MacOS/Keet
+```
+
+The report contains timings and sample counts only. Six starts should reuse one
+engine graph (`engineBuilds` stays at 1), stop capture completely (`idleSamples` is
+0 and `engineStopped` is true), and report no errors. The final check deliberately
+builds an engine that delivers no audio, then rebuilds it: `silentEngineDetected`
+must be true and `recoverySamples` positive. First-audio timing depends on the
+microphone and system load; compare the same device before and after a change.
+
+The hardware input format is compared with its own prepared format. A mono hardware
+input can feed a stereo graph output, so comparing those two sides would rebuild a
+healthy engine on every shortcut press.
+
+### Capture and delivery
+
 1. **Key down.** A listen-only event tap sees Left Option go down alone and tells the
    controller. (The Hebrew key arrives as a registered hot key instead; see
    [Hebrew](#hebrew).) The controller starts the audio engine on its audio queue and asks the

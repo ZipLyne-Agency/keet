@@ -345,17 +345,52 @@ final class OverlayController {
     private var orderOutWork: DispatchWorkItem?
     private var dismissTimer: Timer?
 
-    /// A panel created while a Space is active lands in that Space, so each
-    /// appearance gets a fresh one rather than reusing a window that may belong
-    /// to a Space you've since left.
+    private var screenIDs: [UInt32] = []
+    private var spaceChanged = false
+    private var spaceObserver: NSObjectProtocol?
+
+    init() {
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.spaceChanged = true }
+        }
+    }
+
+    deinit {
+        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
+    }
+
+    /// Keep the hosts warm between dictations. A Space or display change rebuilds
+    /// them, so a reused window cannot be stranded on a previous Space.
     private func makePanel() -> OverlayPanel {
         let panel = OverlayPanel()
         let root = OverlayRoot(
             model: model,
             onCopy: { [weak self] in self?.copyResult() },
             onClose: { [weak self] in self?.hide() })
-        panel.contentView = FirstMouseHostingView(rootView: root)
+        let hosting = FirstMouseHostingView(rootView: root)
+        hosting.sizingOptions = []
+        panel.contentView = hosting
         return panel
+    }
+
+    func prepare() { preparePanels(for: targetScreens) }
+
+    private var targetScreens: [NSScreen] {
+        let screens = NSScreen.screens
+        if let forced = ProcessInfo.processInfo.environment["KEET_TEST_SCREEN"].flatMap(Int.init),
+           screens.indices.contains(forced) { return [screens[forced]] }
+        return screens
+    }
+
+    private func preparePanels(for screens: [NSScreen]) {
+        let ids = screens.map { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
+        guard spaceChanged || screenIDs != ids || panels.count != screens.count else { return }
+        panels.forEach { $0.orderOut(nil) }
+        panels = screens.map { _ in makePanel() }
+        screenIDs = ids
+        spaceChanged = false
     }
 
     var isShowingResult: Bool {
@@ -405,7 +440,6 @@ final class OverlayController {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.model.phase == .hidden else { return }
             self.panels.forEach { $0.orderOut(nil) }
-            self.panels = []
         }
         orderOutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
@@ -440,15 +474,8 @@ final class OverlayController {
 
     private func present(size: NSSize, interactive: Bool) {
         orderOutWork?.cancel()
-        var screens = NSScreen.screens
-        if let forced = ProcessInfo.processInfo.environment["KEET_TEST_SCREEN"].flatMap(Int.init),
-           screens.indices.contains(forced) {
-            screens = [screens[forced]]
-        }
-        if panels.count != screens.count {
-            panels.forEach { $0.orderOut(nil) }
-            panels = screens.map { _ in makePanel() }
-        }
+        let screens = targetScreens
+        preparePanels(for: screens)
         for (panel, screen) in zip(panels, screens) {
             let visible = screen.visibleFrame
             let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 6)

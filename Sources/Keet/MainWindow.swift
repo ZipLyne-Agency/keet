@@ -120,31 +120,6 @@ private struct TermField: View {
     }
 }
 
-private struct Meter: View {
-    let level: Float
-    var segments = 30
-
-    var body: some View {
-        GeometryReader { geo in
-            let lit = Int((level * Float(segments)).rounded())
-            HStack(spacing: 2) {
-                ForEach(0..<segments, id: \.self) { i in
-                    Rectangle()
-                        .fill(i < lit ? color(i) : Color(white: 0.12))
-                        .frame(width: max(1, (geo.size.width - CGFloat(segments - 1) * 2) / CGFloat(segments)))
-                }
-            }
-        }
-        .animation(.linear(duration: 0.05), value: level)
-    }
-
-    private func color(_ i: Int) -> Color {
-        if i < Int(Double(segments) * 0.6) { return Term.green }
-        if i < Int(Double(segments) * 0.85) { return Term.amber }
-        return Term.red
-    }
-}
-
 private struct LatencyBar: View {
     let label: String
     let ms: Int?
@@ -207,10 +182,12 @@ private struct Sparkline: View {
 }
 
 private struct Blink: View {
-    @State private var on = true
     var body: some View {
-        Text("_").font(.mono(15, .bold)).opacity(on ? 1 : 0)
-            .onAppear { withAnimation(.easeInOut(duration: 0.55).repeatForever()) { on.toggle() } }
+        // A discrete cursor blink needs no display-rate animation or layout loop.
+        TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 0.6)) { context in
+            Text("_").font(.mono(15, .bold))
+                .opacity(Int(context.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 0 ? 1 : 0)
+        }
     }
 }
 
@@ -747,15 +724,14 @@ private struct ControlPanel: View {
 
                 SectionHeader(title: "MIC LEVEL")
                 VStack(alignment: .leading, spacing: 8) {
-                    Meter(level: controller.liveLevel).frame(height: 22)
+                    LiveAudioMeter(levels: controller.audioLevels).frame(height: 22)
                     HStack {
                         TermButton(title: controller.isTestingMic ? "STOP TEST" : "TEST MIC",
                                    color: controller.isTestingMic ? Term.red : Term.green,
                                    action: controller.toggleMicTest)
                         Spacer()
-                        if controller.isTestingMic, controller.micTestPeakDb > -100 {
-                            let gap = controller.micTestPeakDb - controller.micTestNoiseDb
-                            Text("VOICE +\(Int(gap.rounded()))dB").font(.termSmall).foregroundStyle(gapColor(gap))
+                        if controller.isTestingMic {
+                            LiveAudioSeparation(levels: controller.audioLevels, prefix: "VOICE ")
                         }
                     }
                 }
@@ -1137,11 +1113,9 @@ private struct SettingsTab: View {
             HStack(spacing: 10) {
                 TermButton(title: controller.isTestingMic ? "STOP" : "TEST", color: controller.isTestingMic ? Term.red : Term.green,
                            action: controller.toggleMicTest)
-                Meter(level: controller.micTestLevel).frame(height: 14)
-                if controller.isTestingMic, controller.micTestPeakDb > -100 {
-                    let gap = controller.micTestPeakDb - controller.micTestNoiseDb
-                    Text("+\(Int(gap.rounded()))dB").font(.termSmall)
-                        .foregroundStyle(gap >= 30 ? Term.green : (gap >= 20 ? Term.amber : Term.red))
+                LiveAudioMeter(levels: controller.audioLevels).frame(height: 14)
+                if controller.isTestingMic {
+                    LiveAudioSeparation(levels: controller.audioLevels)
                         .frame(width: 50, alignment: .trailing)
                 }
             }
@@ -1307,11 +1281,17 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             window.isReleasedWhenClosed = false
             window.isMovableByWindowBackground = true
             window.minSize = NSSize(width: 1080, height: 640)
-            window.contentView = NSHostingView(rootView: MainView(controller: controller, history: controller.history))
             window.setFrameAutosaveName("KeetMainWindowTerminal")
             if !window.setFrameUsingName("KeetMainWindowTerminal") { window.center() }
             window.delegate = self
             self.window = window
+        }
+        if let window, !(window.contentView is NSHostingView<MainView>) {
+            let hosting = NSHostingView(rootView: MainView(controller: controller, history: controller.history))
+            // The window owns its size and minimum. Measuring the ideal size of a
+            // large lazy transcript feed on every animation frame is unnecessary.
+            hosting.sizingOptions = []
+            window.contentView = hosting
         }
         // A Dock icon while the window is open makes it reachable with Command-Tab.
         NSApp.setActivationPolicy(.regular)
@@ -1321,6 +1301,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         controller.stopMicTest()
+        // A closed window must not keep its clock, animations and feed layout alive.
+        window?.contentView = nil
         NSApp.setActivationPolicy(.accessory)
     }
 }

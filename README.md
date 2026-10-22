@@ -6,8 +6,8 @@ leaves the Mac.
 
 Keet transcribes with NVIDIA's **Parakeet Unified 0.6B** (English) on the Apple Neural
 Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio). Transcribing a
-few seconds of speech takes 30 to 70 ms on an M5 Max, and capture starts within about
-30 ms of pressing the key.
+few seconds of speech takes 30 to 70 ms on an M5 Max. The microphone graph is prepared
+before you press the key and reused while its hardware format stays the same.
 
 - **Hold to talk.** A pill at the bottom of the screen shows a live waveform (and,
   optionally, the words as you say them).

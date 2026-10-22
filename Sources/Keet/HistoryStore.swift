@@ -54,27 +54,45 @@ final class HistoryStore: ObservableObject {
     /// When off, dictations live only in memory until Keet quits.
     @Published var keepOnDisk: Bool = UserDefaults.standard.object(forKey: "keepHistory") as? Bool ?? true {
         didSet {
-            UserDefaults.standard.set(keepOnDisk, forKey: "keepHistory")
-            if keepOnDisk { save() } else { try? FileManager.default.removeItem(at: url) }
+            preferences?.set(keepOnDisk, forKey: "keepHistory")
+            if keepOnDisk {
+                save()
+            } else {
+                // Serialize deletion behind pending saves, so a queued snapshot
+                // cannot recreate private history after persistence was disabled.
+                let url = url
+                writer.async { try? FileManager.default.removeItem(at: url) }
+            }
         }
     }
 
     private let url: URL
+    private let preferences: UserDefaults?
     private let limit = 10_000
-    private let writer = DispatchQueue(label: "keet.history", qos: .utility)
+    private let writer: DispatchQueue
 
-    init() {
+    init(storageURL: URL? = nil, preferences: UserDefaults = .standard,
+         writer: DispatchQueue = DispatchQueue(label: "keet.history", qos: .utility)) {
+        self.preferences = preferences
+        self.writer = writer
+        _keepOnDisk = Published(initialValue: preferences.object(forKey: "keepHistory") as? Bool ?? true)
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Keet", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        url = dir.appendingPathComponent("history.json")
+        url = storageURL ?? dir.appendingPathComponent("history.json")
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         load()
         migrateLegacy()
+        if !keepOnDisk {
+            let url = url
+            writer.async { try? FileManager.default.removeItem(at: url) }
+        }
     }
 
     /// In-memory store with the given entries (screenshots, previews).
     init(sample: [Dictation]) {
         url = FileManager.default.temporaryDirectory.appendingPathComponent("keet-sample-history.json")
+        preferences = nil
+        writer = DispatchQueue(label: "keet.history.sample", qos: .utility)
         // Set the storage directly: going through the property would run its
         // observer and switch off saving in the real app's settings.
         _keepOnDisk = Published(initialValue: false)
@@ -98,6 +116,7 @@ final class HistoryStore: ObservableObject {
     }
 
     private func load() {
+        guard keepOnDisk else { return }
         guard let data = try? Data(contentsOf: url) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -118,14 +137,18 @@ final class HistoryStore: ObservableObject {
 
     /// Early builds kept plain strings in UserDefaults; bring them over once.
     private func migrateLegacy() {
-        guard let old = UserDefaults.standard.stringArray(forKey: "history"), !old.isEmpty else { return }
+        guard keepOnDisk else {
+            preferences?.removeObject(forKey: "history")
+            return
+        }
+        guard let old = preferences?.stringArray(forKey: "history"), !old.isEmpty else { return }
         let now = Date()
         let migrated = old.enumerated().map { index, text in
             Dictation(date: now.addingTimeInterval(-Double(index)), text: text, appName: nil, bundleID: nil,
                       audioSeconds: 0, latencyMs: 0, delivery: .pasted)
         }
         entries.append(contentsOf: migrated)
-        UserDefaults.standard.removeObject(forKey: "history")
+        preferences?.removeObject(forKey: "history")
         save()
     }
 }

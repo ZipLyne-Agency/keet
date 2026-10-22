@@ -14,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tapRetry: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let out = ProcessInfo.processInfo.environment["KEET_LATENCY_PROBE"] {
+            RecordingProbe.run(output: URL(fileURLWithPath: out))
+            return
+        }
         if let out = ProcessInfo.processInfo.environment["KEET_MIC_PROBE"] {
             MicProbe.run(output: URL(fileURLWithPath: out))
             return

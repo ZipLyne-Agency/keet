@@ -77,6 +77,8 @@ public final class AudioRecorder: @unchecked Sendable {
 
     public private(set) var sampleRate: Double = 48_000
     public private(set) var isRunning = false
+    /// Successful graph builds, for the headless lifecycle regression probe.
+    public private(set) var engineBuildCount = 0
 
     /// Called on an arbitrary thread when the input device changes mid-session.
     public var onInterruption: (@Sendable () -> Void)?
@@ -111,7 +113,7 @@ public final class AudioRecorder: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var store: SampleStore?
     private var needsRebuild = true
-    private var builtFormat: AVAudioFormat?
+    private var builtHardwareFormat: AVAudioFormat?
     private var configObserver: NSObjectProtocol?
 
     // Test injection: feed a file in real time instead of the microphone.
@@ -197,8 +199,12 @@ public final class AudioRecorder: @unchecked Sendable {
         self.engine = engine
         self.store = store
         self.sampleRate = format.sampleRate
-        builtFormat = format
+        // Hardware input and graph output need not have the same channel count.
+        // Comparing a mono microphone with the graph's stereo output rebuilt a
+        // healthy engine on every press and delayed capture unnecessarily.
+        builtHardwareFormat = input.inputFormat(forBus: 0)
         needsRebuild = false
+        engineBuildCount += 1
     }
 
     public func start() throws {
@@ -213,9 +219,10 @@ public final class AudioRecorder: @unchecked Sendable {
         // rate, or the device re-enumerated after sleep). An engine built for the old
         // format gets no audio. Compare the hardware side: once the sink is connected,
         // the input node's output format just reports the connection's format.
-        if let engine, let builtFormat {
+        if let engine, let builtHardwareFormat {
             let hardware = engine.inputNode.inputFormat(forBus: 0)
-            if hardware.sampleRate != builtFormat.sampleRate || hardware.channelCount != builtFormat.channelCount {
+            if hardware.sampleRate != builtHardwareFormat.sampleRate
+                || hardware.channelCount != builtHardwareFormat.channelCount {
                 needsRebuild = true
                 try prepare()
             }
