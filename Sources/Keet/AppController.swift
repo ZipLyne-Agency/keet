@@ -114,6 +114,10 @@ final class AppController: ObservableObject {
     private let audioQueue = DispatchQueue(label: "keet.audio", qos: .userInteractive)
     private let tail = TailPolicy()
     private var deviceWatcher: AudioDeviceWatcher?
+    /// The pending engine rebuild after audio devices changed. A simulator booting or a
+    /// dock reconnecting fires a burst of changes while formats are still settling, so
+    /// only the last one in a burst rebuilds.
+    private var deviceRebuild: DispatchWorkItem?
     private var activationObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
     // Owned exclusively by audioQueue, like the recorder and session pumps.
@@ -174,6 +178,8 @@ final class AppController: ObservableObject {
         hotkey.onRelease = { [weak self] in self?.keyReleased(.english) }
         functionHotkey.onPress = { [weak self] in self?.keyPressed(.hebrew) }
         functionHotkey.onRelease = { [weak self] in self?.keyReleased(.hebrew) }
+        hotkey.mayDictate = { [weak self] in self?.mayDictateHere() ?? true }
+        functionHotkey.mayDictate = { [weak self] in self?.mayDictateHere() ?? true }
         hotkey.onCancel = { [weak self] reason in self?.cancel(reason) }
         hotkey.onEscape = { [weak self] in
             guard let self, self.overlay.isShowingResult else { return }
@@ -403,11 +409,27 @@ final class AppController: ObservableObject {
         refreshDevices()
         // The engine is bound to whichever device it was built on; rebuild so the
         // next dictation uses the current default or the chosen mic coming back.
-        audioQueue.async { [recorder] in
-            recorder.invalidate()
-            if !recorder.isRunning { try? recorder.prepare() }
+        // A press before the rebuild below builds the engine on the new devices itself.
+        audioQueue.async { [recorder] in recorder.invalidate() }
+        deviceRebuild?.cancel()
+        let rebuild = DispatchWorkItem { [audioQueue, recorder] in
+            audioQueue.async {
+                guard !recorder.isRunning else { return }
+                do {
+                    try recorder.prepare()
+                } catch {
+                    // The next key press builds it again; this only costs that press a
+                    // few hundred milliseconds.
+                    log.error("microphone rebuild after a device change failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
+        deviceRebuild = rebuild
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deviceSettleDelay, execute: rebuild)
     }
+
+    /// How long audio devices must stay unchanged before the engine is rebuilt.
+    static let deviceSettleDelay: TimeInterval = 0.5
 
     // MARK: - Microphone test
 
@@ -476,6 +498,24 @@ final class AppController: ObservableObject {
     }
 
     // MARK: - Dictation lifecycle
+
+    /// Refuses a press only when the cursor is in a password field. Secure input alone
+    /// isn't enough: it's global, and an app holding it in the background would otherwise
+    /// make the key do nothing everywhere.
+    private func mayDictateHere() -> Bool {
+        guard SecureInput.isOn else { return true }
+        let holder = SecureInput.holderDescription()
+        let password = inserter.focusIsPasswordField()
+        // Focus unreadable: refuse only if the app in front is the one asking for secrecy.
+        let refuse = password ?? (SecureInput.holderPID() == NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        if refuse {
+            log.notice("key down ignored: password field has focus (secure input held by \(holder, privacy: .public))")
+            NSSound.beep()
+        } else {
+            log.notice("secure input is on (held by \(holder, privacy: .public)), cursor isn't in a password field: dictating")
+        }
+        return !refuse
+    }
 
     private func keyPressed(_ language: DictationLanguage) {
         let pressed = CFAbsoluteTimeGetCurrent()

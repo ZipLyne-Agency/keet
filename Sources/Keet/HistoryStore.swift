@@ -123,6 +123,9 @@ final class HistoryStore: ObservableObject {
         entries = (try? decoder.decode([Dictation].self, from: data)) ?? []
     }
 
+    /// Waits for pending writes, so quitting can't lose the last dictation.
+    func flush() { writer.sync {} }
+
     private func save() {
         guard keepOnDisk else { return }
         let snapshot = entries

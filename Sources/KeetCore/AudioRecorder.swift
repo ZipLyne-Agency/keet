@@ -2,6 +2,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
+import KeetObjC
 import Synchronization
 
 /// Single-producer sample store. The real-time audio thread appends; any other
@@ -68,7 +69,27 @@ final class SampleStore: @unchecked Sendable {
 public final class AudioRecorder: @unchecked Sendable {
     public enum RecorderError: LocalizedError {
         case noInputDevice
-        public var errorDescription: String? { "No microphone is available." }
+        /// AVAudioEngine raised an exception, usually because the microphone's format
+        /// changed while the graph was being built (devices coming and going as a
+        /// simulator boots or a dock reconnects). Building again on the next try works.
+        case engine(String)
+        public var errorDescription: String? {
+            switch self {
+            case .noInputDevice: "No microphone is available."
+            case .engine(let reason): "The audio engine refused the microphone: \(reason)"
+            }
+        }
+    }
+
+    /// Runs AVAudioEngine work and turns an Objective-C exception into a Swift error.
+    /// Without this, an exception from `connect` or `start` ends the whole app, and the
+    /// dictation key stops working until Keet is opened again.
+    public static func guarded<T>(_ body: () throws -> T) throws -> T {
+        var result: Result<T, Error>?
+        if let exception = KTCatchException({ result = Result { try body() } }) {
+            throw RecorderError.engine(exception.localizedDescription)
+        }
+        return try result!.get()
     }
 
     /// Longest recording, in seconds. Memory is only used as audio arrives
@@ -140,8 +161,16 @@ public final class AudioRecorder: @unchecked Sendable {
     /// Builds the engine ahead of the first key press so starting is only `start()`.
     public func prepare() throws {
         guard testSamples == nil, needsRebuild else { return }
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
+        try buildEngine()
+    }
+
+    /// Only the AVAudioEngine calls that can raise are guarded: an exception skips the
+    /// cleanup of every Swift frame it passes through, so this frame stays outside.
+    private func buildEngine() throws {
+        let (engine, input) = try Self.guarded { () -> (AVAudioEngine, AVAudioInputNode) in
+            let engine = AVAudioEngine()
+            return (engine, engine.inputNode)
+        }
         let chosen = preferredDeviceUID.flatMap(AudioDevices.device(uid:))
         if let chosen, let unit = input.audioUnit {
             var id = chosen.id
@@ -153,12 +182,14 @@ public final class AudioRecorder: @unchecked Sendable {
         activeDeviceName = active?.name
         activeTransport = active?.transport
         if voiceProcessing {
-            try input.setVoiceProcessingEnabled(true)
-            // Keep other apps' audio at full volume while dictating.
-            input.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            try Self.guarded {
+                try input.setVoiceProcessingEnabled(true)
+                // Keep other apps' audio at full volume while dictating.
+                input.voiceProcessingOtherAudioDuckingConfiguration =
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            }
         }
-        let format = input.outputFormat(forBus: 0)
+        let format = try Self.guarded { input.outputFormat(forBus: 0) }
         guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputDevice }
 
         let store = SampleStore(capacity: Int(format.sampleRate * Self.maximumSeconds))
@@ -178,9 +209,11 @@ public final class AudioRecorder: @unchecked Sendable {
             )
             return noErr
         }
-        engine.attach(sink)
-        engine.connect(input, to: sink, format: format)
-        engine.prepare()
+        try Self.guarded {
+            engine.attach(sink)
+            engine.connect(input, to: sink, format: format)
+            engine.prepare()
+        }
 
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = NotificationCenter.default.addObserver(
@@ -202,7 +235,7 @@ public final class AudioRecorder: @unchecked Sendable {
         // Hardware input and graph output need not have the same channel count.
         // Comparing a mono microphone with the graph's stereo output rebuilt a
         // healthy engine on every press and delayed capture unnecessarily.
-        builtHardwareFormat = input.inputFormat(forBus: 0)
+        builtHardwareFormat = try? Self.guarded { input.inputFormat(forBus: 0) }
         needsRebuild = false
         engineBuildCount += 1
     }
@@ -220,22 +253,22 @@ public final class AudioRecorder: @unchecked Sendable {
         // format gets no audio. Compare the hardware side: once the sink is connected,
         // the input node's output format just reports the connection's format.
         if let engine, let builtHardwareFormat {
-            let hardware = engine.inputNode.inputFormat(forBus: 0)
-            if hardware.sampleRate != builtHardwareFormat.sampleRate
-                || hardware.channelCount != builtHardwareFormat.channelCount {
+            let hardware = try? Self.guarded { engine.inputNode.inputFormat(forBus: 0) }
+            if hardware?.sampleRate != builtHardwareFormat.sampleRate
+                || hardware?.channelCount != builtHardwareFormat.channelCount {
                 needsRebuild = true
                 try prepare()
             }
         }
         store?.reset()
         do {
-            try engine?.start()
+            try Self.guarded { try engine?.start() }
         } catch {
             // A stale engine (device unplugged, sample rate changed) fails here; rebuild once.
             needsRebuild = true
             try prepare()
             store?.reset()
-            try engine?.start()
+            try Self.guarded { try engine?.start() }
         }
         isRunning = true
     }
@@ -246,7 +279,7 @@ public final class AudioRecorder: @unchecked Sendable {
     /// the engine ends up connected with a format the device no longer has.
     /// Anything captured so far is discarded.
     public func rebuildAndRestart() throws {
-        engine?.stop()
+        try? Self.guarded { engine?.stop() }
         isRunning = false
         needsRebuild = true
         try start()
@@ -260,10 +293,11 @@ public final class AudioRecorder: @unchecked Sendable {
             testTimer?.cancel()
             testTimer = nil
         } else {
-            engine?.stop()
+            try? Self.guarded { engine?.stop() }
             // stop() releases the engine's resources; prepare again now so the next
-            // key press only has to start it.
-            engine?.prepare()
+            // key press only has to start it. If the device changed under it, the next
+            // press builds a fresh engine instead.
+            if (try? Self.guarded { engine?.prepare() }) == nil { needsRebuild = true }
         }
         isRunning = false
         guard let store else { return [] }

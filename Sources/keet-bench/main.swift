@@ -34,6 +34,30 @@ guard let command = args.first else {
     exit(2)
 }
 
+if command == "churn" {
+    // Rebuilds and starts the microphone graph over and over. Run it while another
+    // process flips the mic's sample rate: the format can change between reading it and
+    // connecting it, which raised an exception that ended Keet. Every round must either
+    // work or throw; a crash is the bug.
+    let rounds = Int(args.count > 1 ? args[1] : "300") ?? 300
+    let recorder = AudioRecorder()
+    var worked = 0, refused = 0
+    for _ in 0..<rounds {
+        recorder.invalidate()
+        do {
+            try recorder.start()
+            usleep(5_000)
+            recorder.stop()
+            worked += 1
+        } catch {
+            refused += 1
+            if refused <= 3 { print("refused: \(error.localizedDescription)") }
+        }
+    }
+    print("churn: \(rounds) rounds, \(worked) worked, \(refused) refused, no crash")
+    exit(0)
+}
+
 if command == "speakers" {
     // Mutes the default output the way a dictation does, checks, then restores.
     func mutedNow() -> String {

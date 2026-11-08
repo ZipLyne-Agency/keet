@@ -137,7 +137,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         menu.addItem(mic)
 
         let login = action("Open at Login", #selector(toggleLogin))
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        login.state = LoginItem.isOn ? .on : .off
         menu.addItem(login)
 
         menu.addItem(.separator())
@@ -186,9 +186,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleLogin() {
-        let service = SMAppService.mainApp
         do {
-            if service.status == .enabled { try service.unregister() } else { try service.register() }
+            try LoginItem.set(!LoginItem.isOn)
         } catch {
             NSSound.beep()
         }

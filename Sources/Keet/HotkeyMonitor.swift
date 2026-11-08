@@ -99,6 +99,14 @@ final class ReleaseWatch {
     }
 }
 
+/// Decides whether a press may start a dictation while macOS secure input is on.
+/// Secure input is global: one app holding it (a password prompt left open behind other
+/// windows, Terminal's Secure Keyboard Entry, a simulator's password field) used to make
+/// the key do nothing everywhere. AppController replaces this with a check of where the
+/// cursor actually is, so only a focused password field refuses.
+typealias DictationGate = () -> Bool
+let secureInputOff: DictationGate = { !IsSecureEventInputEnabled() }
+
 /// Holds a bare function key as a second dictation key, through a registered hot key.
 /// Unlike the listen-only tap, a hot key takes the key for itself: the app you're in
 /// never sees the F12 meant for Keet (in VS Code it would jump to a definition), and
@@ -109,6 +117,7 @@ final class FunctionKeyHotkey {
 
     var onPress: () -> Void = {}
     var onRelease: () -> Void = {}
+    var mayDictate: DictationGate = secureInputOff
     private(set) var key: FunctionKey?
     private var registration: EventHotKeyRef?
     private var handler: EventHandlerRef?
@@ -161,7 +170,7 @@ final class FunctionKeyHotkey {
     private func handle(pressed: Bool) {
         if pressed {
             // As with the main key: never dictate into a password field.
-            guard !held, !IsSecureEventInputEnabled() else { return }
+            guard !held, mayDictate() else { return }
             held = true
             onPress()
             guard let key else { return }
@@ -192,6 +201,7 @@ final class HotkeyMonitor {
     var choice: HotkeyChoice
     var onPress: () -> Void = {}
     var onRelease: () -> Void = {}
+    var mayDictate: DictationGate = secureInputOff
     var onCancel: (CancelReason) -> Void = { _ in }
     /// After holding this long it's a dictation, not a shortcut: stray keys, clicks and
     /// modifiers no longer cancel it. Only Escape does.
@@ -281,7 +291,7 @@ final class HotkeyMonitor {
                 if down, !held {
                     // Only a bare press dictates; with other modifiers it's a shortcut. While
                     // the Hebrew key is held, the main key is ignored altogether.
-                    guard !choice.othersHeld(flags), !IsSecureEventInputEnabled(), !functionKeyHeld else { return }
+                    guard !choice.othersHeld(flags), !functionKeyHeld, mayDictate() else { return }
                     let now = DispatchTime.now().uptimeNanoseconds
                     if event.timestamp > 0, now > event.timestamp {
                         let delay = Int((now - event.timestamp) / 1_000_000)

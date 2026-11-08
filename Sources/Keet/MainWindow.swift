@@ -910,7 +910,7 @@ private struct WordRow: View {
 private struct SettingsTab: View {
     @ObservedObject var controller: AppController
     @ObservedObject var history: HistoryStore
-    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var openAtLogin = LoginItem.isOn
     @State private var inputVolume: Float?
 
     var body: some View {
@@ -935,13 +935,11 @@ private struct SettingsTab: View {
                         toggle("MUTE SPEAKERS", "Silence the speakers while you talk so they don't leak into the mic", $controller.muteSpeakers)
                         toggle("AI CLEANUP", "Drop um, uh, filler like and repeats", $controller.aiCleanup)
                         toggle("LIVE WORDS", "Show words in the pill while you talk", $controller.livePreview)
-                        toggle("OPEN AT LOGIN", "Start Keet when you log in", $openAtLogin)
+                        toggle("OPEN AT LOGIN", "Start Keet when you log in, and reopen it if it crashes", $openAtLogin)
                             .onChange(of: openAtLogin) { _, on in
-                                do {
-                                    if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                                } catch {
-                                    openAtLogin = SMAppService.mainApp.status == .enabled
-                                }
+                                guard on != LoginItem.isOn else { return }
+                                do { try LoginItem.set(on) } catch {}
+                                openAtLogin = LoginItem.isOn
                             }
                         toggle("KEEP HISTORY", "Save dictations on this Mac", $history.keepOnDisk)
                     }

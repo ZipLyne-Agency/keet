@@ -512,7 +512,11 @@ The hotkey monitor is a listen-only `CGEventTap`: it can never block or delay ty
 even if Keet hangs. Left and right Option are told apart with the device-dependent
 modifier bits in the event flags (`0x20` left, `0x40` right). A press only counts if no
 other modifier is held. Any key, click, or extra modifier while holding cancels,
-including Escape. Keet ignores the key while macOS secure input is on (password fields).
+including Escape. Keet ignores the key when the cursor is in a password field. It checks
+the focused element (`AXSecureTextField`) rather than macOS secure input alone: secure
+input is global, and one app holding it in the background (a password prompt left open,
+Terminal's Secure Keyboard Entry, a simulator's password field) used to make the key do
+nothing everywhere, silently. Every refusal is logged with the app holding secure input.
 The tap re-enables itself if macOS switches it off, and checks for a release it may have
 missed while off.
 
@@ -670,7 +674,7 @@ the F keys are brightness and volume unless you hold Fn or turn on "Use F1, F2, 
 as standard function keys"; on other keyboards they're plain F keys. If the English key is
 Fn (Globe), Fn plus an F key starts an English dictation first, so on a Mac keyboard use
 the standard-function-keys setting instead. As with the English key, Keet won't start a
-dictation while a password field has secure input on.
+dictation while the cursor is in a password field.
 
 **What's left out for Hebrew.** AI cleanup and the Dictionary are built for English
 (filler words, English word lists, an English word spotter), so Hebrew dictations skip
@@ -830,3 +834,25 @@ their microphone is in use. Pick the Mac's built-in or a USB microphone in Setti
   the app before the paste does.
 - Focus detection is a heuristic. It is tested in TextEdit, Finder and terminals; other
   apps rely on the rules above.
+
+## Staying alive
+
+Two things used to leave the dictation key dead until Keet was opened again.
+
+**Audio device churn.** Booting a simulator, reconnecting a dock or switching outputs
+fires a burst of device changes while formats are still settling. AVAudioEngine reports a
+graph it can't build by raising an Objective-C exception ("Input HW format and tap format
+not matching"), which Swift can't catch, so on 2026-11-08 one ended the app. Every engine
+call now goes through `AudioRecorder.guarded`, backed by the `KeetObjC` target's
+`KTCatchException`, which turns the exception into a thrown error; the next press simply
+builds the graph again. Device changes are also coalesced: only the last change in a
+half-second burst rebuilds. `keet-bench churn` rebuilds and starts the graph hundreds of
+times for running while another process flips the microphone's sample rate.
+
+**Nothing to bring it back.** Open at Login is a launchd agent
+(`Contents/Library/LaunchAgents/agency.ziplyne.keet.agent.plist`, registered through
+`SMAppService.agent`) with `KeepAlive` set to restart on an unsuccessful exit, so a crash is
+reopened within a second while Quit leaves it quit. A copy opened from Finder hands over to
+the agent and exits, so the running Keet is always the supervised one. Quitting skips
+C++ static destructors with `_exit(0)` after saving: whisper.cpp's Metal backend aborts in
+them, which made every Quit a crash and would have made the agent reopen it.

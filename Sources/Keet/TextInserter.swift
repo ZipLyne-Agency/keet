@@ -101,6 +101,18 @@ final class TextInserter {
         return classify(focused as! AXUIElement, bundleID: bundleID)
     }
 
+    /// Whether the cursor is in a password field. nil when the focused app doesn't say.
+    func focusIsPasswordField() -> Bool? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let element = focused as! AXUIElement
+        return stringAttribute(element, kAXSubroleAttribute) == kAXSecureTextFieldSubrole
+    }
+
     /// Whether this focused element takes typing.
     func classify(_ element: AXUIElement, bundleID: String) -> Target {
         let names = attributeNames(element)

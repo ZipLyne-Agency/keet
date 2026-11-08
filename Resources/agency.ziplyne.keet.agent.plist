@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Opens Keet at login and opens it again if it ever quits by crashing.
+	     Quit from the menu exits cleanly, so launchd leaves it quit. -->
+	<key>Label</key>
+	<string>agency.ziplyne.keet.agent</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/Keet</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>agency.ziplyne.keet</string>
+	</array>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<!-- At most one relaunch every 10 seconds if something keeps killing it. -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

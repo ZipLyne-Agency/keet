@@ -14,9 +14,11 @@ let package = Package(
             url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-b5130-xcframework.zip",
             checksum: "033a43b0174e8cf9b366f72e4a428cdcf126f93ad1c87d3fa119a96bed6f231a"
         ),
+        // Catches the Objective-C exceptions AVAudioEngine raises, which Swift can't.
+        .target(name: "KeetObjC"),
         .target(
             name: "KeetCore",
-            dependencies: [.product(name: "FluidAudio", package: "FluidAudio"), "whisper"]
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio"), "whisper", "KeetObjC"]
         ),
         .executableTarget(
             name: "Keet", dependencies: ["KeetCore"],
@@ -24,7 +26,7 @@ let package = Package(
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(name: "keet-bench", dependencies: ["KeetCore"]),
-        .testTarget(name: "KeetCoreTests", dependencies: ["KeetCore"]),
+        .testTarget(name: "KeetCoreTests", dependencies: ["KeetCore", "KeetObjC"]),
         .testTarget(name: "KeetTests", dependencies: ["Keet"]),
     ],
     swiftLanguageModes: [.v5]

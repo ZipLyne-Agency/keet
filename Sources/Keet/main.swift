@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Snapshot.render(to: URL(fileURLWithPath: dir), controller: demo)
             return
         }
+        guard LoginItem.launch() else { exit(0) }
         SpeakerMute.restoreAfterCrash()
         controller = AppController()
         statusMenu = StatusMenu(controller: controller)
@@ -75,6 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opening Keet again (Finder, Spotlight, Dock) brings up the window.
     func applicationWillTerminate(_ notification: Notification) {
         controller?.restoreSpeakers()
+        controller?.history.flush()
+        UserDefaults.standard.synchronize()
+        // whisper.cpp's Metal backend aborts in its C++ static destructors at exit
+        // (ggml_metal_rsets_free), so every Quit ended in a crash, which the login agent
+        // would answer by reopening Keet. Everything is saved above; skip them.
+        _exit(0)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

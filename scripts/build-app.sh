@@ -49,6 +49,9 @@ rm -rf "${APP:?}"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/Keet" "$APP/Contents/MacOS/Keet"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# The launchd agent that opens Keet at login and reopens it after a crash (LoginItem.swift).
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp Resources/agency.ziplyne.keet.agent.plist "$APP/Contents/Library/LaunchAgents/"
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp -R "$BIN/FluidAudio_FluidAudio.bundle" "$APP/Contents/Resources/"
 # whisper.cpp, for Hebrew. The binary finds it through @executable_path/../Frameworks.
